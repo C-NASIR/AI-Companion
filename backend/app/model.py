@@ -7,10 +7,15 @@ import os
 from collections.abc import AsyncIterator
 from typing import AsyncGenerator
 
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 from openai import AsyncOpenAI
 
-load_dotenv()
+_DOTENV_PATH = find_dotenv(filename=".env", usecwd=True)
+
+if _DOTENV_PATH:
+    load_dotenv(dotenv_path=_DOTENV_PATH)
+else:
+    load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
