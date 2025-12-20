@@ -1,0 +1,36 @@
+# Environment
+.env
+.env.*
+*.env
+
+# Documentation (not tracked per instructions)
+docs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+*.egg-info/
+.venv/
+venv/
+
+# Node / frontend builds
+node_modules/
+frontend/.next/
+frontend/out/
+frontend/dist/
+frontend/.turbo/
+
+# Build artifacts
+backend/.mypy_cache/
+backend/.pytest_cache/
+*.log
+coverage/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
