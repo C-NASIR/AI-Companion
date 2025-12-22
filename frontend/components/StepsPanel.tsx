@@ -1,6 +1,6 @@
 "use client";
 
-export type StepVisualState = "pending" | "started" | "completed";
+import type { StepVisualState } from "../lib/chatTypes";
 
 interface Step {
   label: string;

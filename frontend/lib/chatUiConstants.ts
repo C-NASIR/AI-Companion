@@ -1,0 +1,77 @@
+import type { ChatMode } from "./backend";
+import type { StepVisualState } from "./chatTypes";
+
+export const MODES: Array<{ value: ChatMode; label: string }> = [
+  { value: "answer", label: "Answer" },
+  { value: "research", label: "Research" },
+  { value: "summarize", label: "Summarize" },
+] as const;
+
+export const STEP_LABELS = [
+  "Receive",
+  "Plan",
+  "Respond",
+  "Verify",
+  "Finalize",
+] as const;
+
+export const FEEDBACK_REASONS = [
+  "Incorrect",
+  "Incomplete",
+  "Latency",
+  "Off-topic",
+  "Other",
+] as const;
+
+export type StepLabel = (typeof STEP_LABELS)[number];
+export type StepUpdateState = "started" | "completed";
+export type StatusValue = "received" | "thinking" | "responding" | "complete";
+
+export type StepStateMap = Record<StepLabel, StepVisualState>;
+
+export const STATUS_LABELS: Record<StatusValue, string> = {
+  received: "Received",
+  thinking: "Thinking",
+  responding: "Responding",
+  complete: "Complete",
+};
+
+export const STATUS_HINTS: Record<StatusValue, string> = {
+  received: "Intent captured. Backend is logging the request.",
+  thinking: "Model call is being prepared.",
+  responding: "Chunks are streaming back.",
+  complete: "Run finished. Review output or send feedback.",
+};
+
+export const DECISION_LABELS: Record<string, string> = {
+  plan_type: "Plan",
+  verification: "Verification",
+  outcome: "Outcome",
+};
+
+export const generateRunId = () => {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `fallback-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+};
+
+export const createInitialSteps = (): StepStateMap => {
+  const map: Partial<Record<StepLabel, StepVisualState>> = {};
+  STEP_LABELS.forEach((label) => {
+    map[label] = "pending";
+  });
+  return map as StepStateMap;
+};
+
+export const isStepLabel = (value: unknown): value is StepLabel =>
+  typeof value === "string" && STEP_LABELS.includes(value as StepLabel);
+
+export const isStepState = (value: unknown): value is StepUpdateState =>
+  value === "started" || value === "completed";
+
+export const isStatusValue = (value: unknown): value is StatusValue =>
+  value === "received" ||
+  value === "thinking" ||
+  value === "responding" ||
+  value === "complete";
