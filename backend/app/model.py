@@ -10,6 +10,8 @@ from typing import AsyncGenerator
 from dotenv import find_dotenv, load_dotenv
 from openai import AsyncOpenAI
 
+from .schemas import ChatMode
+
 _DOTENV_PATH = find_dotenv(filename=".env", usecwd=True)
 
 if _DOTENV_PATH:
@@ -36,12 +38,31 @@ def _get_client() -> AsyncOpenAI:
     return _client
 
 
-async def real_stream(message: str, run_id: str) -> AsyncGenerator[str, None]:
+async def real_stream(
+    message: str, context: str | None, mode: ChatMode, run_id: str
+) -> AsyncGenerator[str, None]:
     """Stream completion chunks from OpenAI."""
     client = _get_client()
+    messages: list[dict[str, str]] = [
+        {
+            "role": "system",
+            "content": (
+                "You are an AI companion focused on clarity. "
+                f"Operate in {mode.value} mode and keep reasoning visible."
+            ),
+        }
+    ]
+    if context:
+        messages.append(
+            {
+                "role": "user",
+                "content": f"Context for reference:\n{context}",
+            }
+        )
+    messages.append({"role": "user", "content": message})
     stream = await client.chat.completions.create(
         model=OPENAI_MODEL,
-        messages=[{"role": "user", "content": message}],
+        messages=messages,
         stream=True,
     )
     async for event in stream:
@@ -59,14 +80,20 @@ async def real_stream(message: str, run_id: str) -> AsyncGenerator[str, None]:
                     yield text
 
 
-async def fake_stream(message: str, run_id: str) -> AsyncGenerator[str, None]:
+async def fake_stream(
+    message: str, context: str | None, mode: ChatMode, run_id: str
+) -> AsyncGenerator[str, None]:
     """Local deterministic stream when OpenAI credentials are unavailable."""
     snippet = (message.strip() or "…")[:60]
+    context_snippet = (context.strip() if context else "none provided")[:80]
     chunks = [
-        f"[fake:{run_id}] ",
+        f"[fake:{run_id}] Mode={mode.value}. ",
         "This is a simulated response. ",
         "User message snippet: ",
         snippet,
+        ". ",
+        "Context snippet: ",
+        context_snippet,
         ". ",
         "Replace OPENAI_API_KEY to enable live streaming.",
     ]
@@ -75,11 +102,13 @@ async def fake_stream(message: str, run_id: str) -> AsyncGenerator[str, None]:
         yield chunk
 
 
-async def stream_chat(message: str, run_id: str) -> AsyncIterator[str]:
+async def stream_chat(
+    message: str, context: str | None, mode: ChatMode, run_id: str
+) -> AsyncIterator[str]:
     """Dispatch to real or fake streamer."""
     if OPENAI_API_KEY:
-        async for chunk in real_stream(message, run_id):
+        async for chunk in real_stream(message, context, mode, run_id):
             yield chunk
     else:
-        async for chunk in fake_stream(message, run_id):
+        async for chunk in fake_stream(message, context, mode, run_id):
             yield chunk
