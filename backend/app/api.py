@@ -1,9 +1,11 @@
-"""API router for Session 0 backend."""
+"""API router coordinating streaming intelligence graph."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
+from contextlib import suppress
 from typing import AsyncGenerator
 
 import json
@@ -12,7 +14,7 @@ from pathlib import Path
 from fastapi import APIRouter, Header, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from .model import stream_chat
+from .intelligence import run_graph
 from .schemas import (
     ChatRequest,
     FeedbackRequest,
@@ -20,6 +22,7 @@ from .schemas import (
     iso_timestamp,
     serialize_event,
 )
+from .state import RunState
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -39,7 +42,7 @@ async def chat_endpoint(
     payload: ChatRequest,
     x_run_id: str | None = Header(default=None, alias="X_Run_Id"),
 ) -> StreamingResponse:
-    """Stream chat completions via model adapter."""
+    """Execute the intelligence graph and stream NDJSON events."""
     run_id = x_run_id or str(uuid.uuid4())
     context_length = len(payload.context or "")
     _log(
@@ -51,73 +54,54 @@ async def chat_endpoint(
         request.client.host if request.client else "unknown",
     )
 
+    state = RunState.new(
+        run_id=run_id,
+        message=payload.message,
+        context=payload.context,
+        mode=payload.mode,
+    )
+
     async def event_stream() -> AsyncGenerator[str, None]:
-        # The event order mirrors the Session 1 contract: status/step scaffolding
-        # precedes any model output so the UI can show progress even before
-        # chunks arrive, and a done event is always emitted at the end.
-        _log("model call started mode=%s", run_id, payload.mode.value)
-        final_chunks: list[str] = []
-        stream_events_emitted = False
-        responding_emitted = False
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
 
-        def emit(event_type: str, data: dict[str, object]) -> str:
-            return serialize_event(build_event(event_type, run_id, data))
+        async def emit(event_type: str, data: dict[str, object]) -> None:
+            await queue.put(serialize_event(build_event(event_type, run_id, data)))
 
-        def ensure_stream_events() -> list[str]:
-            nonlocal stream_events_emitted
-            if stream_events_emitted:
-                return []
-            stream_events_emitted = True
-            return [
-                emit("step", {"label": "Model call started", "state": "completed"}),
-                emit("step", {"label": "Model streaming response", "state": "started"}),
-            ]
+        async def graph_runner() -> None:
+            _log("graph execution started", run_id)
+            try:
+                await run_graph(state, emit)
+            except Exception:
+                logger.exception("graph execution failed", extra={"run_id": run_id})
+                await emit(
+                    "error",
+                    {"message": "Unexpected error while generating a response."},
+                )
+                await emit(
+                    "done",
+                    {
+                        "final_text": state.output_text,
+                        "outcome": "failed",
+                        "reason": "internal error",
+                    },
+                )
+            finally:
+                _log("graph execution ended", run_id)
+                await queue.put(None)
+
+        task = asyncio.create_task(graph_runner())
 
         try:
-            yield emit("status", {"value": "received"})
-            yield emit("step", {"label": "Request received", "state": "started"})
-            yield emit("step", {"label": "Request received", "state": "completed"})
-            yield emit("status", {"value": "thinking"})
-            yield emit("step", {"label": "Model call started", "state": "started"})
-
-            async for chunk in stream_chat(
-                payload.message, payload.context, payload.mode, run_id
-            ):
-                if not responding_emitted:
-                    yield emit("status", {"value": "responding"})
-                    responding_emitted = True
-                    for line in ensure_stream_events():
-                        yield line
-                final_chunks.append(chunk)
-                yield emit("output", {"text": chunk})
-
-            for line in ensure_stream_events():
-                yield line
-
-            yield emit(
-                "step", {"label": "Model streaming response", "state": "completed"}
-            )
-            yield emit("status", {"value": "complete"})
-            yield emit("step", {"label": "Response complete", "state": "completed"})
-            yield emit("done", {"final_text": "".join(final_chunks)})
-
-        except Exception:
-            logger.exception("model stream error", extra={"run_id": run_id})
-            for line in ensure_stream_events():
-                yield line
-            yield emit(
-                "step",
-                {"label": "Model streaming response", "state": "completed"},
-            )
-            yield emit(
-                "error",
-                {"message": "Unexpected error while generating a response."},
-            )
-            yield emit("status", {"value": "complete"})
-            yield emit("step", {"label": "Response complete", "state": "completed"})
-            yield emit("done", {"final_text": "".join(final_chunks)})
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                yield item
         finally:
-            _log("model stream ended", run_id)
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
             _log("request completed", run_id)
 
     try:

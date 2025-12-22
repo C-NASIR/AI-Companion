@@ -1,6 +1,6 @@
 # AI Companion
 
-Session 1 builds on the Session 0 vertical slice by making the intelligence flow observable: structured intent capture (message/context/mode), NDJSON event streaming (`status`, `step`, `output`, `error`, `done`), a visible steps panel, and run-tied feedback logging. Run IDs still span browser logs, backend `/chat`, and `/feedback` endpoints.
+Session 2 extends the Session 1 vertical slice with an explicit intelligence control graph (`receive → plan → respond → verify → finalize`), typed node/decision events, and visible verification outcomes while preserving the same streaming and run_id guarantees.
 
 ## Repository layout
 
@@ -58,14 +58,14 @@ Visit http://localhost:3000 and use the session UI. When you click **Send**, the
 - `OPENAI_MODEL` (optional) – default `gpt-4o-mini`.
 - `NEXT_PUBLIC_BACKEND_URL` – frontend uses this to locate the backend (automatically set inside Docker, configure manually for local dev).
 
-## Streaming event schema
+## Streaming event schema and intelligence graph observability
 
 - Content type: `application/x-ndjson`
 - Envelope format:
 
 ```json
 {
-  "type": "status | step | output | error | done",
+  "type": "status | step | output | error | done | node | decision",
   "run_id": "<uuid>",
   "ts": "<ISO-8601 timestamp>",
   "data": {}
@@ -73,10 +73,12 @@ Visit http://localhost:3000 and use the session UI. When you click **Send**, the
 ```
 
 - `status`: `{ "value": "received" | "thinking" | "responding" | "complete" }`
-- `step`: `{ "label": "Request received" | "Model call started" | "Model streaming response" | "Response complete", "state": "started" | "completed" }`
+- `step`: `{ "label": "Receive" | "Plan" | "Respond" | "Verify" | "Finalize", "state": "started" | "completed" }`
 - `output`: `{ "text": "<chunk>" }`
 - `error`: `{ "message": "<human readable>" }`
-- `done`: `{ "final_text": "<full output>" }`
+- `node`: `{ "name": "<graph node>", "state": "started" | "completed" }`
+- `decision`: `{ "name": "plan_type" | "verification" | "outcome" | ..., "value": "<value>", "notes": "<optional reason>" }`
+- `done`: `{ "final_text": "<full output>", "outcome": "success|failed", "reason": "<optional>" }`
 
 Implementation references: backend event helpers in `backend/app/schemas.py`, NDJSON generator in `backend/app/api.py`, frontend stream parser in `frontend/lib/ndjson.ts`.
 
@@ -84,19 +86,25 @@ Feedback submissions are persisted to `backend/data/feedback.jsonl`. The backend
 
 Use a root-level `.env` to share OpenAI settings with docker-compose, or export them before launching the backend locally.
 
+### Inspecting the intelligence layer
+
+- The backend orchestrates runs via `backend/app/intelligence.py`, a fixed graph composed of `receive`, `plan`, `respond`, `verify`, and `finalize` nodes. Each node emits `node` and `step` events so the UI mirrors internal progress.
+- Plan decisions classify the run as `direct_answer`, `needs_clarification`, or `cannot_answer`. Verification emits `pass`/`fail` decisions, and finalize emits an `outcome` decision. All are logged with the same run_id.
+- The frontend’s response panel includes a “Decisions” block showing the emitted decision events plus the final outcome/reason so you can trace why a response took a particular path.
+
 ## Regression checklist (Phase 8)
 
 1. **Structured intent** – Use the UI to enter message + optional context + mode; empty message should trigger client validation.
-2. **Visible flow** – Observe status banner cycling `Received → Thinking → Responding → Complete` before any output chunk.
-3. **Steps panel** – Ensure steps flip from Pending → In progress → Done strictly in response to backend events.
+2. **Visible flow** – Observe status banner cycling `Received → Thinking → Responding → Complete` before any output chunk. The status card also shows the final outcome/reason once `done` arrives.
+3. **Steps panel & nodes** – Ensure the steps panel (Receive/Plan/Respond/Verify/Finalize) only updates when the backend emits matching step events, and that `node` events appear in NDJSON logs for deeper inspection.
 4. **Structured streaming** – Run  
    ```bash
    curl -N -H "Content-Type: application/json" \
      -d '{"message":"ping","mode":"answer"}' \
      http://localhost:8000/chat
    ```  
-   and confirm NDJSON lines follow `{type,run_id,ts,data}` schema with `application/x-ndjson` content type.
+   confirm NDJSON lines include `node`/`decision` events alongside status/output entries, still using `application/x-ndjson`.
 5. **Feedback as data** – After completion, click 👍 or 👎. For 👎 select a reason (or choose **Other** and submit a description) and verify `backend/data/feedback.jsonl` gains a new entry with the run_id.
-6. **Trace discipline** – Check browser console + backend logs for identical run_id values by running `docker compose logs backend | grep <run_id>`.
+6. **Trace discipline** – Check browser console + backend logs for identical run_id values by running `docker compose logs backend | grep <run_id>`. Node/decision logs should include the same run id.
 
 See `docs/session_1_phase1.md` for baseline findings and `docs/session_1_phase8.md` for the detailed validation runbook used to verify these steps.

@@ -23,12 +23,7 @@ const MODES: Array<{ value: ChatMode; label: string }> = [
   { value: "summarize", label: "Summarize" },
 ] as const;
 
-const STEP_LABELS = [
-  "Request received",
-  "Model call started",
-  "Model streaming response",
-  "Response complete",
-] as const;
+const STEP_LABELS = ["Receive", "Plan", "Respond", "Verify", "Finalize"] as const;
 
 const FEEDBACK_REASONS = [
   "Incorrect",
@@ -43,6 +38,13 @@ type StepUpdateState = "started" | "completed";
 type StatusValue = "received" | "thinking" | "responding" | "complete";
 
 type StepStateMap = Record<StepLabel, StepVisualState>;
+
+interface DecisionEntry {
+  name: string;
+  value: string;
+  notes?: string;
+  ts: string;
+}
 
 interface SubmissionMeta {
   message: string;
@@ -92,6 +94,12 @@ const isStatusValue = (value: unknown): value is StatusValue =>
   value === "responding" ||
   value === "complete";
 
+const DECISION_LABELS: Record<string, string> = {
+  plan_type: "Plan",
+  verification: "Verification",
+  outcome: "Outcome",
+};
+
 export default function HomePage() {
   const [message, setMessage] = useState("");
   const [context, setContext] = useState("");
@@ -104,6 +112,9 @@ export default function HomePage() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [runComplete, setRunComplete] = useState(false);
   const [finalText, setFinalText] = useState("");
+  const [decisions, setDecisions] = useState<DecisionEntry[]>([]);
+  const [runOutcome, setRunOutcome] = useState<string | null>(null);
+  const [runOutcomeReason, setRunOutcomeReason] = useState<string | null>(null);
 
   const [formError, setFormError] = useState<string | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
@@ -182,6 +193,30 @@ export default function HomePage() {
         ignoreOutputRef.current = true;
         break;
       }
+      case "decision": {
+        const name =
+          typeof event.data?.name === "string" ? event.data.name : null;
+        const value =
+          typeof event.data?.value === "string" ? event.data.value : null;
+        if (!name || !value) break;
+        const notes =
+          typeof event.data?.notes === "string" ? event.data.notes : undefined;
+        setDecisions((prev) => [
+          ...prev,
+          {
+            name,
+            value,
+            notes,
+            ts: event.ts,
+          },
+        ]);
+        break;
+      }
+      case "node": {
+        // Node events are logged implicitly through the steps panel and don't
+        // require direct rendering beyond acknowledging the type.
+        break;
+      }
       case "done": {
         const final =
           typeof event.data?.final_text === "string"
@@ -189,6 +224,16 @@ export default function HomePage() {
             : "";
         setFinalText(final);
         setRunComplete(true);
+        const outcome =
+          typeof event.data?.outcome === "string"
+            ? event.data.outcome
+            : null;
+        const reason =
+          typeof event.data?.reason === "string"
+            ? event.data.reason
+            : null;
+        setRunOutcome(outcome);
+        setRunOutcomeReason(reason);
         break;
       }
       default:
@@ -212,6 +257,9 @@ export default function HomePage() {
     setSteps(createInitialSteps());
     setOutput("");
     setFinalText("");
+    setDecisions([]);
+    setRunOutcome(null);
+    setRunOutcomeReason(null);
     setCurrentRunId(runId);
     setIsStreaming(true);
     setRunComplete(false);
@@ -427,6 +475,15 @@ export default function HomePage() {
                 Run id will appear once you start streaming.
               </p>
             )}
+            {runOutcome ? (
+              <p className="text-xs text-slate-400">
+                Outcome:{" "}
+                <span className="font-semibold text-slate-200">
+                  {runOutcome}
+                </span>
+                {runOutcomeReason ? ` — ${runOutcomeReason}` : ""}
+              </p>
+            ) : null}
           </div>
         </div>
         <div className="flex flex-col gap-4 md:flex-row">
@@ -444,6 +501,40 @@ export default function HomePage() {
                 <p className="text-slate-500">
                   No output yet. Status updates will arrive before text does.
                 </p>
+              )}
+            </div>
+            <div className="mt-3 rounded-xl border border-slate-800/60 bg-slate-950/40 p-3">
+              <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
+                Decisions
+              </p>
+              {decisions.length === 0 ? (
+                <p className="mt-2 text-xs text-slate-500">
+                  Decision events will appear here as the run progresses.
+                </p>
+              ) : (
+                <ul className="mt-2 space-y-2 text-sm text-slate-200">
+                  {decisions.map((entry) => {
+                    const label = DECISION_LABELS[entry.name] ?? entry.name;
+                    return (
+                      <li
+                        key={`${entry.ts}-${entry.name}`}
+                        className="rounded-lg border border-slate-800/50 bg-slate-900/60 p-2"
+                      >
+                        <p className="text-xs uppercase tracking-[0.2em] text-slate-400">
+                          {label}
+                        </p>
+                        <p className="font-mono text-sm text-slate-100">
+                          {entry.value}
+                        </p>
+                        {entry.notes ? (
+                          <p className="text-xs text-slate-500">
+                            {entry.notes}
+                          </p>
+                        ) : null}
+                      </li>
+                    );
+                  })}
+                </ul>
               )}
             </div>
           </div>

@@ -28,7 +28,7 @@ class ChatRequest(BaseModel):
     mode: ChatMode = Field(default=ChatMode.ANSWER, description="Execution mode")
 
 
-EventType = Literal["status", "step", "output", "error", "done"]
+EventType = Literal["status", "step", "output", "error", "done", "node", "decision"]
 
 
 def iso_timestamp() -> str:

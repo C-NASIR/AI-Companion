@@ -4,7 +4,14 @@ const DEFAULT_BACKEND_URL = "http://localhost:8000";
 
 export type ChatMode = "answer" | "research" | "summarize";
 
-export type ChatEventType = "status" | "step" | "output" | "error" | "done";
+export type ChatEventType =
+  | "status"
+  | "step"
+  | "output"
+  | "error"
+  | "done"
+  | "node"
+  | "decision";
 
 export interface ChatEvent {
   type: ChatEventType;
