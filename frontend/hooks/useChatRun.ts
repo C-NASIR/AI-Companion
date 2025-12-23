@@ -177,6 +177,12 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
         break;
       }
 
+      case "run.started": {
+        setSteps(createInitialSteps());
+        setRetrievalAttempted(false);
+        break;
+      }
+
       case "node.started":
       case "node.completed": {
         const name =
