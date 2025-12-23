@@ -27,10 +27,12 @@ docker compose -f infra/compose.yaml up --build
 
 Ports:
 
-- Frontend at http://localhost:3000
-- Backend at http://localhost:8000
+- Frontend at http://localhost:3000 (Next.js dev server with hot reload)
+- Backend at http://localhost:8000 (Uvicorn `--reload`)
 
-Stop with `CTRL+C`. The backend entrypoint empties `/app/data` on startup and again on shutdown, so each `docker compose up` session begins with fresh directories while still exposing live files at `backend/data/events` and `backend/data/state` on your host. If you want to persist runs, remove the cleanup logic or change the compose mount per the inline comments.
+Stop with `CTRL+C`. The backend entrypoint still clears `backend/data/events` and `backend/data/state` on startup/shutdown, but the repository itself is bind-mounted into both containers. That means any code change you make locally is reflected immediately in the running containers without rebuilding; the backend auto-restarts, and the frontend dev server hot reloads the UI.
+
+> Tip: run `npm install` inside `frontend/` once on the host so `node_modules/` exists for the bind mount. The containers reuse that directory for faster restarts.
 
 ## Local development workflow
 

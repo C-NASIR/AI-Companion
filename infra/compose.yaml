@@ -8,9 +8,17 @@ services:
       - ../.env
     ports:
       - "8000:8000"
-    # Bind mount host data dir; entrypoint wipes it on start/stop for ephemeral runs.
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+    # Bind mount entire backend repo so code edits are visible immediately.
     volumes:
-      - ../backend/data:/app/data
+      - ../backend:/app
 
   frontend:
     build:
@@ -19,5 +27,13 @@ services:
       - backend
     environment:
       - NEXT_PUBLIC_BACKEND_URL=http://backend:8000
+      - NODE_ENV=development
     ports:
       - "3000:3000"
+    command:
+      - npm
+      - run
+      - dev
+    # Mirror local frontend sources (including node_modules) for instant reloads.
+    volumes:
+      - ../frontend:/app
