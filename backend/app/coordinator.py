@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Callable
+from typing import Callable, Mapping
 
 from .events import Event, EventBus, new_event
 from .intelligence import GRAPH, NODE_MAP, NodeContext
-from .state import RunState
+from .state import RunPhase, RunState
 from .state_store import StateStore
 
 logger = logging.getLogger(__name__)
@@ -77,7 +77,9 @@ class RunCoordinator:
                         "run finished via event type=%s", event.type, extra={"run_id": run_id}
                     )
                     break
-                next_node = self._next_node_for_event(event)
+                if event.type in {"tool.completed", "tool.failed"}:
+                    await self._handle_tool_event(state, ctx, event)
+                next_node = self._next_node_for_event(state, event)
                 if not next_node:
                     continue
                 spec = NODE_MAP.get(next_node)
@@ -112,11 +114,68 @@ class RunCoordinator:
             self._tasks.pop(run_id, None)
             logger.info("run coordinator loop ended", extra={"run_id": run_id})
 
+    async def _handle_tool_event(self, state: RunState, ctx: NodeContext, event: Event) -> None:
+        run_id = state.run_id
+        tool_name = event.data.get("tool_name")
+        if not isinstance(tool_name, str):
+            tool_name = "unknown"
+        duration_ms = int(event.data.get("duration_ms") or 0)
+        if event.type == "tool.completed":
+            output = event.data.get("output")
+            if not isinstance(output, Mapping):
+                output = {}
+            state.record_tool_result(
+                name=tool_name,
+                status="completed",
+                payload=output,
+                duration_ms=duration_ms,
+            )
+            notes = f"{tool_name} completed"
+            state.record_decision("tool_result", "completed", notes=notes)
+            await ctx.emit_decision(state, "tool_result", "completed", notes)
+            logger.info(
+                "tool completed recorded tool=%s duration_ms=%s",
+                tool_name,
+                duration_ms,
+                extra={"run_id": run_id},
+            )
+        else:
+            error = event.data.get("error")
+            if not isinstance(error, Mapping):
+                error = {"error": "unknown"}
+            state.record_tool_result(
+                name=tool_name,
+                status="failed",
+                payload=error,
+                duration_ms=duration_ms,
+            )
+            error_reason = error.get("error")
+            reason_str = (
+                error_reason if isinstance(error_reason, str) else "tool_failed"
+            )
+            state.record_decision("tool_result", "failed", notes=reason_str)
+            await ctx.emit_decision(state, "tool_result", "failed", reason_str)
+            state.set_verification(passed=False, reason="tool_failed")
+            logger.warning(
+                "tool failed tool=%s reason=%s",
+                tool_name,
+                reason_str,
+                extra={"run_id": run_id},
+            )
+        state.transition_phase(RunPhase.RESPOND)
+        ctx.save_state(state)
+
     @staticmethod
-    def _next_node_for_event(event: Event) -> str | None:
+    def _next_node_for_event(state: RunState, event: Event) -> str | None:
         if event.type == "run.started":
             return NODE_SEQUENCE[0]
+        if event.type == "tool.completed":
+            return "verify"
+        if event.type == "tool.failed":
+            return "finalize"
         if event.type == "node.completed":
+            if state.phase == RunPhase.WAITING_FOR_TOOL:
+                return None
             completed_name = event.data.get("name")
             if isinstance(completed_name, str):
                 return NEXT_NODE.get(completed_name)

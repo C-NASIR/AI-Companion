@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
+from typing import Any, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -35,8 +36,41 @@ class RunPhase(str, Enum):
     RECEIVE = "receive"
     PLAN = "plan"
     RESPOND = "respond"
+    WAITING_FOR_TOOL = "waiting_for_tool"
     VERIFY = "verify"
     FINALIZE = "finalize"
+
+
+class ToolRequestRecord(BaseModel):
+    """Recorded intent for a tool invocation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    arguments: dict[str, Any]
+    ts: str = Field(default_factory=iso_timestamp)
+
+
+class ToolResultRecord(BaseModel):
+    """Structured record for the outcome of a tool invocation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    status: str
+    output: dict[str, Any] | None = None
+    error: dict[str, Any] | None = None
+    duration_ms: int | None = None
+    ts: str = Field(default_factory=iso_timestamp)
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.status not in ("completed", "failed"):
+            msg = f"invalid tool result status={self.status}"
+            raise ValueError(msg)
+        if self.status == "completed" and not isinstance(self.output, dict):
+            raise ValueError("completed tool results require output data")
+        if self.status == "failed" and not isinstance(self.error, dict):
+            raise ValueError("failed tool results require error data")
 
 
 class RunState(BaseModel):
@@ -58,6 +92,9 @@ class RunState(BaseModel):
     created_at: str = Field(default_factory=iso_timestamp)
     updated_at: str = Field(default_factory=iso_timestamp)
     decisions: list[DecisionRecord] = Field(default_factory=list)
+    tool_requests: list[ToolRequestRecord] = Field(default_factory=list)
+    tool_results: list[ToolResultRecord] = Field(default_factory=list)
+    last_tool_status: str | None = None
 
     @classmethod
     def new(
@@ -99,6 +136,43 @@ class RunState(BaseModel):
     def record_decision(self, name: str, value: str, notes: str | None = None) -> None:
         """Store a decision entry and update the timestamp."""
         self.decisions.append(DecisionRecord(name=name, value=value, notes=notes))
+        self._touch()
+
+    def record_tool_request(
+        self, *, name: str, arguments: Mapping[str, Any], status: str = "requested"
+    ) -> None:
+        """Persist metadata for a requested tool invocation."""
+        self.tool_requests.append(
+            ToolRequestRecord(name=name, arguments=dict(arguments))
+        )
+        self.last_tool_status = status
+        self._touch()
+
+    def record_tool_result(
+        self,
+        *,
+        name: str,
+        status: str,
+        payload: Mapping[str, Any],
+        duration_ms: int | None,
+    ) -> None:
+        """Persist tool execution results."""
+        if status not in {"completed", "failed"}:
+            msg = f"invalid tool status {status}"
+            raise ValueError(msg)
+        record_kwargs: dict[str, Any] = {
+            "name": name,
+            "status": status,
+            "duration_ms": duration_ms,
+        }
+        if status == "completed":
+            record_kwargs["output"] = dict(payload)
+            record_kwargs["error"] = None
+        else:
+            record_kwargs["error"] = dict(payload)
+            record_kwargs["output"] = None
+        self.tool_results.append(ToolResultRecord(**record_kwargs))
+        self.last_tool_status = status
         self._touch()
 
     def set_plan_type(self, plan_type: PlanType) -> None:

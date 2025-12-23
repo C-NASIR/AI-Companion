@@ -11,7 +11,10 @@ export type RunEventType =
   | "decision.made"
   | "output.chunk"
   | "status.changed"
-  | "error.raised";
+  | "error.raised"
+  | "tool.requested"
+  | "tool.completed"
+  | "tool.failed";
 
 export interface RunEvent {
   id: string;

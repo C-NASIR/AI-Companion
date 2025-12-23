@@ -7,7 +7,9 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api import router
+from .api import EVENT_BUS, router
+from .executor import ToolExecutor
+from .tools import get_tool_registry
 
 
 class _RunIdFilter(logging.Filter):
@@ -32,6 +34,8 @@ def _configure_logging() -> None:
 
 _configure_logging()
 
+TOOL_EXECUTOR = ToolExecutor(EVENT_BUS, get_tool_registry())
+
 
 def create_app() -> FastAPI:
     """Construct the FastAPI application."""
@@ -44,6 +48,14 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.include_router(router)
+
+    @app.on_event("startup")
+    async def _startup() -> None:
+        await TOOL_EXECUTOR.start()
+
+    @app.on_event("shutdown")
+    async def _shutdown() -> None:
+        await TOOL_EXECUTOR.shutdown()
 
     @app.get("/health")
     async def health() -> dict[str, str]:

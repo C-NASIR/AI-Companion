@@ -1,4 +1,4 @@
-export type StepVisualState = "pending" | "started" | "completed";
+export type StepVisualState = "pending" | "started" | "completed" | "failed";
 
 export interface DecisionEntry {
   name: string;

@@ -31,6 +31,35 @@ class Event(BaseModel):
     data: dict[str, Any] = Field(default_factory=dict)
 
 
+class ToolRequestedPayload(BaseModel):
+    """Data stored with tool.requested events."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool_name: str
+    arguments: dict[str, Any]
+
+
+class ToolCompletedPayload(BaseModel):
+    """Data stored with tool.completed events."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool_name: str
+    output: dict[str, Any]
+    duration_ms: int = Field(ge=0)
+
+
+class ToolFailedPayload(BaseModel):
+    """Data stored with tool.failed events."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool_name: str
+    error: dict[str, Any]
+    duration_ms: int = Field(ge=0)
+
+
 def new_event(event_type: str, run_id: str, data: Mapping[str, Any]) -> Event:
     """Create a fresh event with metadata initialized."""
     return Event(
@@ -41,6 +70,48 @@ def new_event(event_type: str, run_id: str, data: Mapping[str, Any]) -> Event:
         type=event_type,
         data=dict(data),
     )
+
+
+def tool_requested_event(
+    run_id: str, *, tool_name: str, arguments: Mapping[str, Any]
+) -> Event:
+    """Helper to build validated tool.requested events."""
+    payload = ToolRequestedPayload(
+        tool_name=tool_name, arguments=dict(arguments)
+    ).model_dump()
+    return new_event("tool.requested", run_id, payload)
+
+
+def tool_completed_event(
+    run_id: str,
+    *,
+    tool_name: str,
+    output: Mapping[str, Any],
+    duration_ms: int,
+) -> Event:
+    """Helper to build validated tool.completed events."""
+    payload = ToolCompletedPayload(
+        tool_name=tool_name,
+        output=dict(output),
+        duration_ms=max(int(duration_ms), 0),
+    ).model_dump()
+    return new_event("tool.completed", run_id, payload)
+
+
+def tool_failed_event(
+    run_id: str,
+    *,
+    tool_name: str,
+    error: Mapping[str, Any],
+    duration_ms: int,
+) -> Event:
+    """Helper to build validated tool.failed events."""
+    payload = ToolFailedPayload(
+        tool_name=tool_name,
+        error=dict(error),
+        duration_ms=max(int(duration_ms), 0),
+    ).model_dump()
+    return new_event("tool.failed", run_id, payload)
 
 
 class EventStore:
@@ -129,12 +200,14 @@ class EventBus:
     def __init__(self, store: EventStore):
         self._store = store
         self._subscribers: dict[str, set[EventCallback]] = {}
+        self._global_subscribers: set[EventCallback] = set()
 
     async def publish(self, event: Event | Mapping[str, Any]) -> Event:
         """Persist event then fan out to live subscribers."""
         stored = self._store.append(event)
         callbacks = list(self._subscribers.get(stored.run_id, ()))
-        for callback in callbacks:
+        global_callbacks = list(self._global_subscribers)
+        for callback in callbacks + global_callbacks:
             try:
                 await callback(stored)
             except Exception:  # pragma: no cover - defensive logging
@@ -157,6 +230,15 @@ class EventBus:
             current.discard(callback)
             if not current:
                 self._subscribers.pop(run_id, None)
+
+        return _unsubscribe
+
+    def subscribe_all(self, callback: EventCallback) -> Callable[[], None]:
+        """Register callback for all run events."""
+        self._global_subscribers.add(callback)
+
+        def _unsubscribe() -> None:
+            self._global_subscribers.discard(callback)
 
         return _unsubscribe
 

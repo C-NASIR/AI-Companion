@@ -15,12 +15,14 @@ const STATE_STYLES: Record<StepVisualState, string> = {
   pending: "border-slate-700 text-slate-500",
   started: "border-amber-400 text-amber-300",
   completed: "border-emerald-500 text-emerald-400",
+  failed: "border-rose-600 text-rose-300",
 };
 
 const STATE_LABELS: Record<StepVisualState, string> = {
   pending: "Pending",
   started: "In progress",
   completed: "Done",
+  failed: "Failed",
 };
 
 export default function StepsPanel({ steps }: StepsPanelProps) {
@@ -44,6 +46,8 @@ export default function StepsPanel({ steps }: StepsPanelProps) {
                 ? "✓"
                 : state === "started"
                 ? "…"
+                : state === "failed"
+                ? "!"
                 : "•"}
             </span>
           </li>

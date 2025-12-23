@@ -11,9 +11,18 @@ export const STEP_LABELS = [
   "Receive",
   "Plan",
   "Respond",
+  "Tool requested",
+  "Tool executing",
+  "Tool completed",
   "Verify",
   "Finalize",
 ] as const;
+
+export const TOOL_STEP_LABELS = {
+  requested: "Tool requested",
+  executing: "Tool executing",
+  completed: "Tool completed",
+} as const;
 
 export const NODE_TO_STEP_LABEL: Record<string, (typeof STEP_LABELS)[number]> = {
   receive: "Receive",
@@ -32,7 +41,7 @@ export const FEEDBACK_REASONS = [
 ] as const;
 
 export type StepLabel = (typeof STEP_LABELS)[number];
-export type StepUpdateState = "started" | "completed";
+export type StepUpdateState = "started" | "completed" | "failed";
 export type StatusValue = "received" | "thinking" | "responding" | "complete";
 
 export type StepStateMap = Record<StepLabel, StepVisualState>;
@@ -56,6 +65,8 @@ export const DECISION_LABELS: Record<string, string> = {
   response_strategy: "Response Strategy",
   verification: "Verification",
   outcome: "Outcome",
+  tool_intent: "Tool Intent",
+  tool_result: "Tool Result",
 };
 
 export const generateRunId = () => {
@@ -77,7 +88,7 @@ export const isStepLabel = (value: unknown): value is StepLabel =>
   typeof value === "string" && STEP_LABELS.includes(value as StepLabel);
 
 export const isStepState = (value: unknown): value is StepUpdateState =>
-  value === "started" || value === "completed";
+  value === "started" || value === "completed" || value === "failed";
 
 export const isStatusValue = (value: unknown): value is StatusValue =>
   value === "received" ||

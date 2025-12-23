@@ -15,6 +15,7 @@ import {
   STATUS_HINTS,
   STATUS_LABELS,
   STEP_LABELS,
+  TOOL_STEP_LABELS,
   type StatusValue,
   type StepStateMap,
 } from "../lib/chatUiConstants";
@@ -106,7 +107,15 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
   }, [statusValue]);
 
   const orderedSteps = useMemo(
-    () => STEP_LABELS.map((label) => ({ label, state: steps[label] })),
+    () =>
+      STEP_LABELS.map((label) => {
+        const state = steps[label] ?? "pending";
+        const displayLabel =
+          label === TOOL_STEP_LABELS.completed && state === "failed"
+            ? "Tool failed"
+            : label;
+        return { label: displayLabel, state };
+      }),
     [steps]
   );
 
@@ -234,6 +243,34 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
         setIsStreaming(false);
         persistActiveRun(null);
         cleanupSubscription();
+        break;
+      }
+
+      case "tool.requested": {
+        setSteps((prev) => ({
+          ...prev,
+          [TOOL_STEP_LABELS.requested]: "completed",
+          [TOOL_STEP_LABELS.executing]: "started",
+          [TOOL_STEP_LABELS.completed]: "pending",
+        }));
+        break;
+      }
+
+      case "tool.completed": {
+        setSteps((prev) => ({
+          ...prev,
+          [TOOL_STEP_LABELS.executing]: "completed",
+          [TOOL_STEP_LABELS.completed]: "completed",
+        }));
+        break;
+      }
+
+      case "tool.failed": {
+        setSteps((prev) => ({
+          ...prev,
+          [TOOL_STEP_LABELS.executing]: "completed",
+          [TOOL_STEP_LABELS.completed]: "failed",
+        }));
         break;
       }
 

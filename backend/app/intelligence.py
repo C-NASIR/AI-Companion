@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Mapping
 
-from .events import EventBus, new_event
+from .events import EventBus, new_event, tool_requested_event
 from .model import stream_chat
 from .schemas import ChatMode
 from .state import PlanType, RunPhase, RunState
@@ -139,6 +140,138 @@ def _chunk_text(text: str, size: int = 32) -> list[str]:
     return [text[i : i + size] for i in range(0, len(text), size)]
 
 
+_SYMBOL_EXPR = re.compile(r"(-?\d+(?:\.\d+)?)\s*([+\-*/])\s*(-?\d+(?:\.\d+)?)")
+_KEYWORD_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
+    (
+        re.compile(
+            r"\badd\s+(-?\d+(?:\.\d+)?)\s+(?:and|to)\s+(-?\d+(?:\.\d+)?)",
+            re.IGNORECASE,
+        ),
+        "add",
+        "normal",
+    ),
+    (
+        re.compile(
+            r"\bsubtract\s+(-?\d+(?:\.\d+)?)\s+from\s+(-?\d+(?:\.\d+)?)",
+            re.IGNORECASE,
+        ),
+        "subtract",
+        "reverse",
+    ),
+    (
+        re.compile(
+            r"\b(?:multiply|times)\s+(-?\d+(?:\.\d+)?)\s+(?:and|by)\s+(-?\d+(?:\.\d+)?)",
+            re.IGNORECASE,
+        ),
+        "multiply",
+        "normal",
+    ),
+    (
+        re.compile(
+            r"\bdivide\s+(-?\d+(?:\.\d+)?)\s+by\s+(-?\d+(?:\.\d+)?)",
+            re.IGNORECASE,
+        ),
+        "divide",
+        "normal",
+    ),
+]
+
+
+def _parse_number(token: str) -> float | None:
+    try:
+        return float(token)
+    except ValueError:
+        return None
+
+
+def _match_symbol_expression(message: str) -> dict[str, float] | None:
+    match = _SYMBOL_EXPR.search(message)
+    if not match:
+        return None
+    a = _parse_number(match.group(1))
+    b = _parse_number(match.group(3))
+    op = match.group(2)
+    if a is None or b is None:
+        return None
+    mapping = {"+": "add", "-": "subtract", "*": "multiply", "/": "divide"}
+    operation = mapping.get(op)
+    if not operation:
+        return None
+    return {"operation": operation, "a": a, "b": b}
+
+
+def _match_keyword_expression(message: str) -> dict[str, float] | None:
+    for pattern, operation, order in _KEYWORD_PATTERNS:
+        match = pattern.search(message)
+        if not match:
+            continue
+        first = match.group(1)
+        second = match.group(2)
+        a = _parse_number(first)
+        b = _parse_number(second)
+        if a is None or b is None:
+            continue
+        if order == "reverse":
+            a, b = b, a
+        return {"operation": operation, "a": a, "b": b}
+    return None
+
+
+def _detect_calculator_request(message: str) -> dict[str, float] | None:
+    symbol_match = _match_symbol_expression(message)
+    if symbol_match:
+        return symbol_match
+    return _match_keyword_expression(message)
+
+
+def _latest_completed_tool(state: RunState):
+    for record in reversed(state.tool_results):
+        if record.status == "completed":
+            return record
+    return None
+
+
+def _format_tool_result_value(value: float | int) -> str:
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _build_tool_summary_text(state: RunState) -> str | None:
+    record = _latest_completed_tool(state)
+    if not record or not record.output:
+        return None
+    result_value = record.output.get("result") if isinstance(record.output, dict) else None
+    if isinstance(result_value, (int, float)):
+        return f"The result is {_format_tool_result_value(result_value)}."
+    return f"{record.name.capitalize()} executed successfully."
+
+
+def _build_tool_failure_text(state: RunState) -> str | None:
+    if not state.tool_results:
+        return None
+    record = state.tool_results[-1]
+    if record.status != "failed" or not record.error:
+        return None
+    reason = record.error.get("error") if isinstance(record.error, dict) else None
+    reason_text = f": {reason}" if isinstance(reason, str) and reason else ""
+    return f"{record.name.capitalize()} failed{reason_text}."
+
+
+async def _append_tool_summary_if_needed(state: RunState, ctx: NodeContext) -> None:
+    if state.last_tool_status != "completed":
+        return
+    if state.output_text.strip():
+        return
+    summary = _build_tool_summary_text(state)
+    if not summary:
+        return
+    state.append_output(summary)
+    await ctx.emit_output(state, summary)
+
+
 async def _stream_synthetic_response(
     state: RunState, ctx: NodeContext, template: str
 ) -> None:
@@ -160,6 +293,28 @@ async def respond_node(state: RunState, ctx: NodeContext) -> RunState:
     async with ctx.node_scope(state, "respond", RunPhase.RESPOND):
         plan = state.plan_type or PlanType.DIRECT_ANSWER
         _log(state.run_id, "respond strategy=%s", plan.value)
+        calculator_args = None
+        if plan == PlanType.DIRECT_ANSWER:
+            calculator_args = _detect_calculator_request(state.message)
+
+        intent_value = "calculator" if calculator_args else "none"
+        state.record_decision("tool_intent", intent_value)
+        await ctx.emit_decision(state, "tool_intent", intent_value)
+
+        if calculator_args:
+            state.record_tool_request(name="calculator", arguments=calculator_args)
+            state.transition_phase(RunPhase.WAITING_FOR_TOOL)
+            await ctx.emit_status(state, "thinking")
+            await ctx.bus.publish(
+                tool_requested_event(
+                    state.run_id,
+                    tool_name="calculator",
+                    arguments=calculator_args,
+                )
+            )
+            _log(state.run_id, "requested calculator tool args=%s", calculator_args)
+            return state
+
         if plan == PlanType.DIRECT_ANSWER:
             await _stream_direct_answer(state, ctx)
             strategy = "model_stream"
@@ -186,7 +341,24 @@ async def respond_node(state: RunState, ctx: NodeContext) -> RunState:
     return state
 
 
+async def verify_node(state: RunState, ctx: NodeContext) -> RunState:
+    """Perform lightweight verification."""
+    async with ctx.node_scope(state, "verify", RunPhase.VERIFY):
+        await _append_tool_summary_if_needed(state, ctx)
+        passed, reason = _evaluate_verification(state)
+        state.set_verification(passed=passed, reason=reason)
+        decision_value = "pass" if passed else "fail"
+        state.record_decision("verification", decision_value, notes=reason)
+        await ctx.emit_decision(state, "verification", decision_value, reason)
+        _log(state.run_id, "verification result=%s", decision_value)
+    return state
+
+
 def _evaluate_verification(state: RunState) -> tuple[bool, str | None]:
+    if state.last_tool_status == "completed":
+        return True, None
+    if state.last_tool_status == "failed":
+        return False, "tool_failed"
     text = state.output_text.strip()
     if not text:
         return False, "empty_output"
@@ -197,24 +369,17 @@ def _evaluate_verification(state: RunState) -> tuple[bool, str | None]:
     return True, None
 
 
-async def verify_node(state: RunState, ctx: NodeContext) -> RunState:
-    """Perform lightweight verification."""
-    async with ctx.node_scope(state, "verify", RunPhase.VERIFY):
-        passed, reason = _evaluate_verification(state)
-        state.set_verification(passed=passed, reason=reason)
-        decision_value = "pass" if passed else "fail"
-        state.record_decision("verification", decision_value, notes=reason)
-        await ctx.emit_decision(state, "verification", decision_value, reason)
-        _log(state.run_id, "verification result=%s", decision_value)
-    return state
-
-
 async def finalize_node(state: RunState, ctx: NodeContext) -> RunState:
     """Emit outcome and completion events."""
     async with ctx.node_scope(state, "finalize", RunPhase.FINALIZE):
         passed = bool(state.verification_passed)
         outcome = "success" if passed else "failed"
         reason = state.verification_reason if not passed else None
+        if not passed and state.last_tool_status == "failed":
+            failure_text = _build_tool_failure_text(state)
+            if failure_text and not state.output_text.strip():
+                state.append_output(failure_text)
+                await ctx.emit_output(state, failure_text)
         state.set_outcome(outcome, reason)
         state.record_decision("outcome", outcome, notes=reason)
         await ctx.emit_decision(state, "outcome", outcome, reason)
