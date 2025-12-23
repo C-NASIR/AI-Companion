@@ -1,13 +1,15 @@
 # AI Companion
 
-Session 2 extends the Session 1 vertical slice with an explicit intelligence control graph (`receive → plan → respond → verify → finalize`), typed node/decision events, and visible verification outcomes while preserving the same streaming and run_id guarantees.
+Session 3 evolves the Session 2 vertical slice into an event-driven system. Runs now emit durable timeline events (`run.started → … → run.completed/failed`) that outlive the HTTP request, the backend coordinator executes the fixed intelligence graph asynchronously, and the frontend consumes Server-Sent Events (SSE) so a run can be replayed even after refreshing the page.
 
 ## Repository layout
 
-- `backend/` – FastAPI app (entrypoint `app/main.py`, routes in `app/api.py`, model adapters in `app/model.py`, Dockerfile, requirements).
-- `frontend/` – Next.js 14 App Router UI with Tailwind styling plus Dockerfile.
-- `infra/compose.yaml` – Single command to build/run both services.
-- `docs/` – Project context, per-session prompts, plans, and findings (`session_1_phase1.md` summarizes current-state verification).
+- `backend/` – FastAPI app (entrypoint `app/main.py`, routes in `app/api.py`, coordinator + event primitives under `app/`).
+- `frontend/` – Next.js 14 App Router UI with Tailwind styling and streaming hooks/components.
+- `backend/data/events` – JSONL event logs (one file per `run_id`, created automatically).
+- `backend/data/state` – `RunState` snapshots persisted after every node.
+- `infra/compose.yaml` – Docker Compose stack. The backend bind-mounts `backend/data` into `/app/data`, and its entrypoint wipes that directory on container start and shutdown so you see live files locally without persisting them between runs.
+- `docs/` – Project overview, per-session prompts, and the Session 3 plan describing the current implementation phases.
 
 ## Prerequisites
 
@@ -27,7 +29,7 @@ Ports:
 - Frontend at http://localhost:3000
 - Backend at http://localhost:8000
 
-You can stop the stack with `CTRL+C`; containers are disposable and can be rebuilt via the same command.
+Stop with `CTRL+C`. The backend entrypoint empties `/app/data` on startup and again on shutdown, so each `docker compose up` session begins with fresh directories while still exposing live files at `backend/data/events` and `backend/data/state` on your host. If you want to persist runs, remove the cleanup logic or change the compose mount per the inline comments.
 
 ## Local development workflow
 
@@ -49,7 +51,39 @@ npm install
 NEXT_PUBLIC_BACKEND_URL=http://localhost:8000 npm run dev
 ```
 
-Visit http://localhost:3000 and use the session UI. When you click **Send**, the browser console logs the generated `run_id` and the backend begins streaming NDJSON events that drive the status banner, steps panel, and output area.
+Visit http://localhost:3000 and use the UI. When you click **Send**, the browser logs the generated `run_id`, POSTs to `/runs`, immediately opens an SSE connection to `/runs/{run_id}/events`, and keeps all UI state in sync with replayed timeline events. Refreshing mid-run reconnects using the stored `run_id` and replays history before live updates resume.
+
+### Manual curl flow
+
+1. Generate an id and start a run:
+
+   ```bash
+   RUN_ID=$(python3 - <<'PY'
+import uuid
+print(uuid.uuid4())
+PY
+)
+   curl -s -X POST \
+     -H "Content-Type: application/json" \
+     -H "X_Run_Id: $RUN_ID" \
+     -d '{"message":"walk me through the control graph","mode":"answer"}' \
+     http://localhost:8000/runs
+   echo "Run started: $RUN_ID"
+   ```
+
+2. Subscribe to its timeline (replay + live):
+
+   ```bash
+   curl -N http://localhost:8000/runs/$RUN_ID/events
+   ```
+
+3. Inspect the latest `RunState` snapshot:
+
+   ```bash
+   curl http://localhost:8000/runs/$RUN_ID/state | jq
+   ```
+
+Feedback stays the same: POST to `/feedback` with the `run_id`, score, reason (for 👎), and final text after the run completes.
 
 ## Environment variables
 
@@ -58,53 +92,50 @@ Visit http://localhost:3000 and use the session UI. When you click **Send**, the
 - `OPENAI_MODEL` (optional) – default `gpt-4o-mini`.
 - `NEXT_PUBLIC_BACKEND_URL` – frontend uses this to locate the backend (automatically set inside Docker, configure manually for local dev).
 
-## Streaming event schema and intelligence graph observability
+## Event schema, timeline, and intelligence graph observability
 
-- Content type: `application/x-ndjson`
-- Envelope format:
+- Content type: `text/event-stream`
+- Every SSE message contains compact JSON (one per line) with this envelope:
 
 ```json
 {
-  "type": "status | step | output | error | done | node | decision",
-  "run_id": "<uuid>",
-  "ts": "<ISO-8601 timestamp>",
-  "data": {}
+  "id": "94cf3eed-3521-4e44-b3ec-68d3a62d4064",
+  "run_id": "6a8f0582-2c80-4ff4-b7ee-821f12d6de0b",
+  "seq": 12,
+  "ts": "2024-06-07T18:41:20.109486+00:00",
+  "type": "node.started",
+  "data": { "name": "respond" }
 }
 ```
 
-- `status`: `{ "value": "received" | "thinking" | "responding" | "complete" }`
-- `step`: `{ "label": "Receive" | "Plan" | "Respond" | "Verify" | "Finalize", "state": "started" | "completed" }`
-- `output`: `{ "text": "<chunk>" }`
-- `error`: `{ "message": "<human readable>" }`
-- `node`: `{ "name": "<graph node>", "state": "started" | "completed" }`
-- `decision`: `{ "name": "plan_type" | "verification" | "outcome" | ..., "value": "<value>", "notes": "<optional reason>" }`
-- `done`: `{ "final_text": "<full output>", "outcome": "success|failed", "reason": "<optional>" }`
+- Event types emitted in Session 3:
+  - `run.started`, `run.completed`, `run.failed`
+  - `node.started`, `node.completed`
+  - `decision.made`
+  - `status.changed`
+  - `output.chunk`
+  - `error.raised`
+- Status payloads keep the Session 2 values (`received | thinking | responding | complete`).
+- Node events include `{ "name": "receive|plan|respond|verify|finalize" }`. The frontend maps those to the steps panel; no synthetic UI state exists.
+- Decision events cover `plan_type`, `response_strategy`, `verification`, and `outcome`, each with optional `notes`.
+- `output.chunk` streams deterministic text chunks (either OpenAI output or the fallback response). `run.completed` or `run.failed` carries `{ "final_text": "...", "reason": "<optional>" }`.
 
-Implementation references: backend event helpers in `backend/app/schemas.py`, NDJSON generator in `backend/app/api.py`, frontend stream parser in `frontend/lib/ndjson.ts`.
+Implementation references: event primitives live in `backend/app/events.py`, the coordinator is `backend/app/coordinator.py`, node logic is in `backend/app/intelligence.py`, and the frontend consumes the SSE feed via the hook in `frontend/hooks/useChatRun.ts` which uses `subscribeToRunEvents` from `frontend/lib/backend.ts`.
 
-Feedback submissions are persisted to `backend/data/feedback.jsonl`. The backend creates the directory/file at runtime, but you can inspect it locally with `tail -n 2 backend/data/feedback.jsonl`.
+All events are appended to `backend/data/events/<run_id>.jsonl`, so you can replay any run later with `cat backend/data/events/<run_id>.jsonl`. RunState snapshots at `backend/data/state/<run_id>.json` store the same information in structured form.
 
-Use a root-level `.env` to share OpenAI settings with docker-compose, or export them before launching the backend locally.
+## Inspecting the intelligence layer
 
-### Inspecting the intelligence layer
+- The intelligence graph (`receive → plan → respond → verify → finalize`) is defined explicitly in `backend/app/intelligence.py`. Each node emits its own lifecycle/status/decision/output events and persists the RunState snapshot upon completion.
+- `backend/app/coordinator.py` listens to the event bus and advances the graph only after it observes the prior node’s completion event, ensuring the graph’s execution order is visible in the timeline.
+- The frontend displays the current status, per-node progress, output chunks, and decision log entirely from the streamed events. No hidden client-side state machines exist.
 
-- The backend orchestrates runs via `backend/app/intelligence.py`, a fixed graph composed of `receive`, `plan`, `respond`, `verify`, and `finalize` nodes. Each node emits `node` and `step` events so the UI mirrors internal progress.
-- Plan decisions classify the run as `direct_answer`, `needs_clarification`, or `cannot_answer`. Verification emits `pass`/`fail` decisions, and finalize emits an `outcome` decision. All are logged with the same run_id.
-- The frontend’s response panel includes a “Decisions” block showing the emitted decision events plus the final outcome/reason so you can trace why a response took a particular path.
+## Validation checklist (Session 3)
 
-## Regression checklist (Phase 8)
+1. **Runs outlive requests** – Start a run, close the tab, and tail `backend/data/events/<run_id>.jsonl`. The coordinator should keep appending events until `run.completed` or `run.failed` shows up.
+2. **UI reconstructs from events** – Trigger a run in the UI and refresh mid-flight. The page should reconnect (using the run id stored in `sessionStorage`), replay the timeline, and continue streaming live events without losing output or decisions.
+3. **Every step emits events** – Subscribe via `curl -N http://localhost:8000/runs/<run_id>/events` and confirm each node yields `node.started`/`node.completed`, `status.changed`, and, where relevant, `decision.made` + `output.chunk`.
+4. **Feedback ties to the timeline** – After completion, submit 👍 or 👎 (with a reason) and verify `backend/data/feedback.jsonl` records the entry with the correct `run_id`.
+5. **Trace discipline** – Browser console logs, backend logs, event files, and RunState snapshots should all contain the same `run_id`. Use `docker compose logs backend | grep <run_id>` to cross-check.
 
-1. **Structured intent** – Use the UI to enter message + optional context + mode; empty message should trigger client validation.
-2. **Visible flow** – Observe status banner cycling `Received → Thinking → Responding → Complete` before any output chunk. The status card also shows the final outcome/reason once `done` arrives.
-3. **Steps panel & nodes** – Ensure the steps panel (Receive/Plan/Respond/Verify/Finalize) only updates when the backend emits matching step events, and that `node` events appear in NDJSON logs for deeper inspection.
-4. **Structured streaming** – Run  
-   ```bash
-   curl -N -H "Content-Type: application/json" \
-     -d '{"message":"ping","mode":"answer"}' \
-     http://localhost:8000/chat
-   ```  
-   confirm NDJSON lines include `node`/`decision` events alongside status/output entries, still using `application/x-ndjson`.
-5. **Feedback as data** – After completion, click 👍 or 👎. For 👎 select a reason (or choose **Other** and submit a description) and verify `backend/data/feedback.jsonl` gains a new entry with the run_id.
-6. **Trace discipline** – Check browser console + backend logs for identical run_id values by running `docker compose logs backend | grep <run_id>`. Node/decision logs should include the same run id.
-
-See `docs/session_1_phase1.md` for baseline findings and `docs/session_1_phase8.md` for the detailed validation runbook used to verify these steps.
+See `docs/session_3_plan.md` for the implementation plan backing these changes and future work notes.

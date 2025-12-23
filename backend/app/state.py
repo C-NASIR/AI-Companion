@@ -52,6 +52,8 @@ class RunState(BaseModel):
     plan_type: PlanType | None = None
     verification_passed: bool | None = None
     verification_reason: str | None = None
+    outcome: str | None = None
+    outcome_reason: str | None = None
     output_text: str = ""
     created_at: str = Field(default_factory=iso_timestamp)
     updated_at: str = Field(default_factory=iso_timestamp)
@@ -110,4 +112,10 @@ class RunState(BaseModel):
         """Capture verification results for the run."""
         self.verification_passed = passed
         self.verification_reason = reason
+        self._touch()
+
+    def set_outcome(self, outcome: str, reason: str | None = None) -> None:
+        """Record the final outcome for the run."""
+        self.outcome = outcome
+        self.outcome_reason = reason
         self._touch()

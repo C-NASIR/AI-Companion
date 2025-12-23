@@ -1,22 +1,24 @@
-import { parseNdjsonStream } from "./ndjson";
-
 const DEFAULT_BACKEND_URL = "http://localhost:8000";
 
 export type ChatMode = "answer" | "research" | "summarize";
 
-export type ChatEventType =
-  | "status"
-  | "step"
-  | "output"
-  | "error"
-  | "done"
-  | "node"
-  | "decision";
+export type RunEventType =
+  | "run.started"
+  | "run.completed"
+  | "run.failed"
+  | "node.started"
+  | "node.completed"
+  | "decision.made"
+  | "output.chunk"
+  | "status.changed"
+  | "error.raised";
 
-export interface ChatEvent {
-  type: ChatEventType;
+export interface RunEvent {
+  id: string;
   run_id: string;
+  seq: number;
   ts: string;
+  type: RunEventType;
   data: Record<string, unknown>;
 }
 
@@ -52,10 +54,9 @@ export function getBackendUrl(): string {
   return DEFAULT_BACKEND_URL;
 }
 
-export async function streamChatRequest(
+export async function startRunRequest(
   payload: ChatPayload,
-  runId: string,
-  onEvent: (event: ChatEvent) => void
+  runId: string
 ): Promise<string> {
   const body: Record<string, unknown> = {
     message: payload.message,
@@ -65,7 +66,7 @@ export async function streamChatRequest(
     body.context = payload.context;
   }
 
-  const response = await fetch(`${getBackendUrl()}/chat`, {
+  const response = await fetch(`${getBackendUrl()}/runs`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -74,21 +75,14 @@ export async function streamChatRequest(
     body: JSON.stringify(body),
   });
 
-  if (!response.body) {
-    throw new Error("Streaming response body missing");
-  }
-
   if (!response.ok) {
     throw new Error(`Backend error: ${response.status}`);
   }
 
-  await parseNdjsonStream(response.body, (value) => {
-    if (!value || typeof value !== "object") return;
-    const event = value as ChatEvent;
-    onEvent(event);
-  });
-
-  return response.headers.get("X_Run_Id") ?? runId;
+  const payloadJson = (await response.json().catch(() => null)) as
+    | { run_id?: string }
+    | null;
+  return payloadJson?.run_id || runId;
 }
 
 export async function submitFeedback(payload: FeedbackPayload): Promise<void> {
@@ -108,4 +102,35 @@ export async function submitFeedback(payload: FeedbackPayload): Promise<void> {
       message || `Feedback submission failed with ${response.status}`
     );
   }
+}
+
+export interface RunEventSubscription {
+  close: () => void;
+}
+
+export function subscribeToRunEvents(
+  runId: string,
+  onEvent: (event: RunEvent) => void
+): RunEventSubscription {
+  const url = `${getBackendUrl()}/runs/${runId}/events`;
+  const source = new EventSource(url, { withCredentials: false });
+
+  source.onmessage = (message: MessageEvent<string>) => {
+    try {
+      const parsed = JSON.parse(message.data) as RunEvent;
+      onEvent(parsed);
+    } catch (error) {
+      console.error("Failed to parse event payload", error, message.data);
+    }
+  };
+
+  source.onerror = (error) => {
+    console.error("EventSource error", error);
+  };
+
+  return {
+    close: () => {
+      source.close();
+    },
+  };
 }

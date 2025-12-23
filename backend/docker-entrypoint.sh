@@ -1,0 +1,33 @@
+#!/bin/bash
+set -euo pipefail
+
+DATA_DIR="/app/data"
+CHILD_PID=""
+
+reset_data_dir() {
+  if [ -d "${DATA_DIR}" ]; then
+    rm -rf "${DATA_DIR:?}/"*
+  fi
+  mkdir -p "${DATA_DIR}/events" "${DATA_DIR}/state"
+}
+
+cleanup() {
+  reset_data_dir || true
+}
+
+forward_signal() {
+  local signal="$1"
+  if [[ -n "${CHILD_PID}" ]]; then
+    kill "-${signal}" "${CHILD_PID}" 2>/dev/null || true
+  fi
+}
+
+trap cleanup EXIT
+trap 'forward_signal TERM' TERM
+trap 'forward_signal INT' INT
+
+reset_data_dir
+
+"$@" &
+CHILD_PID=$!
+wait "${CHILD_PID}"

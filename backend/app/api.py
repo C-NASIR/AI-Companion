@@ -1,52 +1,51 @@
-"""API router coordinating streaming intelligence graph."""
+"""API router for Session 3 event-driven backend."""
 
 from __future__ import annotations
 
-import asyncio
+import json
 import logging
 import uuid
-from contextlib import suppress
-from typing import AsyncGenerator
-
-import json
 from pathlib import Path
 
-from fastapi import APIRouter, Header, Request, status
+from fastapi import APIRouter, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from .intelligence import run_graph
-from .schemas import (
-    ChatRequest,
-    FeedbackRequest,
-    build_event,
-    iso_timestamp,
-    serialize_event,
-)
+from .coordinator import RunCoordinator
+from .events import EventBus, EventStore, sse_event_stream
+from .schemas import ChatRequest, FeedbackRequest, iso_timestamp
 from .state import RunState
+from .state_store import StateStore
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 FEEDBACK_FILE = DATA_DIR / "feedback.jsonl"
+EVENTS_DIR = DATA_DIR / "events"
+STATE_DIR = DATA_DIR / "state"
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+EVENT_STORE = EventStore(EVENTS_DIR)
+EVENT_BUS = EventBus(EVENT_STORE)
+STATE_STORE = StateStore(STATE_DIR)
+RUN_COORDINATOR = RunCoordinator(EVENT_BUS, STATE_STORE)
 
 
 def _log(message: str, run_id: str, *args: object) -> None:
     logger.info(message, *args, extra={"run_id": run_id})
 
 
-@router.post("/chat")
-async def chat_endpoint(
+@router.post("/runs")
+async def create_run(
     request: Request,
     payload: ChatRequest,
     x_run_id: str | None = Header(default=None, alias="X_Run_Id"),
-) -> StreamingResponse:
-    """Execute the intelligence graph and stream NDJSON events."""
+) -> JSONResponse:
+    """Start a new run and return immediately."""
     run_id = x_run_id or str(uuid.uuid4())
     context_length = len(payload.context or "")
     _log(
-        "request received mode=%s message_length=%s context_length=%s client=%s",
+        "run request mode=%s message_length=%s context_length=%s client=%s",
         run_id,
         payload.mode.value,
         len(payload.message),
@@ -61,58 +60,32 @@ async def chat_endpoint(
         mode=payload.mode,
     )
 
-    async def event_stream() -> AsyncGenerator[str, None]:
-        queue: asyncio.Queue[str | None] = asyncio.Queue()
+    await RUN_COORDINATOR.start_run(state)
+    return JSONResponse({"ok": True, "run_id": run_id})
 
-        async def emit(event_type: str, data: dict[str, object]) -> None:
-            await queue.put(serialize_event(build_event(event_type, run_id, data)))
 
-        async def graph_runner() -> None:
-            _log("graph execution started", run_id)
-            try:
-                await run_graph(state, emit)
-            except Exception:
-                logger.exception("graph execution failed", extra={"run_id": run_id})
-                await emit(
-                    "error",
-                    {"message": "Unexpected error while generating a response."},
-                )
-                await emit(
-                    "done",
-                    {
-                        "final_text": state.output_text,
-                        "outcome": "failed",
-                        "reason": "internal error",
-                    },
-                )
-            finally:
-                _log("graph execution ended", run_id)
-                await queue.put(None)
+@router.get("/runs/{run_id}/events")
+async def run_events(run_id: str) -> StreamingResponse:
+    """Replay stored events and stream new ones using SSE."""
 
-        task = asyncio.create_task(graph_runner())
+    async def event_generator():
+        async for chunk in sse_event_stream(run_id, EVENT_STORE, EVENT_BUS):
+            yield chunk
 
-        try:
-            while True:
-                item = await queue.get()
-                if item is None:
-                    break
-                yield item
-        finally:
-            if not task.done():
-                task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await task
-            _log("request completed", run_id)
+    response = StreamingResponse(event_generator(), media_type="text/event-stream")
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["X-Accel-Buffering"] = "no"
+    response.headers["X-Run-Id"] = run_id
+    return response
 
-    try:
-        response = StreamingResponse(
-            event_stream(), media_type="application/x-ndjson"
-        )
-        response.headers["X_Run_Id"] = run_id
-        return response
-    except Exception:
-        logger.exception("request failed", extra={"run_id": run_id})
-        raise
+
+@router.get("/runs/{run_id}/state")
+async def run_state(run_id: str) -> JSONResponse:
+    """Return the latest stored RunState snapshot."""
+    state = STATE_STORE.load(run_id)
+    if not state:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="run not found")
+    return JSONResponse(state.model_dump())
 
 
 @router.post("/feedback")

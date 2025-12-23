@@ -15,6 +15,14 @@ export const STEP_LABELS = [
   "Finalize",
 ] as const;
 
+export const NODE_TO_STEP_LABEL: Record<string, (typeof STEP_LABELS)[number]> = {
+  receive: "Receive",
+  plan: "Plan",
+  respond: "Respond",
+  verify: "Verify",
+  finalize: "Finalize",
+};
+
 export const FEEDBACK_REASONS = [
   "Incorrect",
   "Incomplete",
@@ -37,14 +45,15 @@ export const STATUS_LABELS: Record<StatusValue, string> = {
 };
 
 export const STATUS_HINTS: Record<StatusValue, string> = {
-  received: "Intent captured. Backend is logging the request.",
-  thinking: "Model call is being prepared.",
-  responding: "Chunks are streaming back.",
+  received: "Intent captured and stored in the run timeline.",
+  thinking: "Planning or verification is in progress.",
+  responding: "Output chunks are flowing through the event log.",
   complete: "Run finished. Review output or send feedback.",
 };
 
 export const DECISION_LABELS: Record<string, string> = {
   plan_type: "Plan",
+  response_strategy: "Response Strategy",
   verification: "Verification",
   outcome: "Outcome",
 };

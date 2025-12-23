@@ -26,6 +26,7 @@ frontend/.turbo/
 # Build artifacts
 backend/.mypy_cache/
 backend/.pytest_cache/
+backend/data/
 *.log
 coverage/
 

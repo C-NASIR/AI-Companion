@@ -8,6 +8,9 @@ services:
       - ../.env
     ports:
       - "8000:8000"
+    # Bind mount host data dir; entrypoint wipes it on start/stop for ephemeral runs.
+    volumes:
+      - ../backend/data:/app/data
 
   frontend:
     build:
