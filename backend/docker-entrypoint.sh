@@ -5,9 +5,8 @@ DATA_DIR="/app/data"
 CHILD_PID=""
 
 reset_data_dir() {
-  if [ -d "${DATA_DIR}" ]; then
-    rm -rf "${DATA_DIR:?}/"*
-  fi
+  mkdir -p "${DATA_DIR}"
+  rm -rf "${DATA_DIR}/events" "${DATA_DIR}/state"
   mkdir -p "${DATA_DIR}/events" "${DATA_DIR}/state"
 }
 

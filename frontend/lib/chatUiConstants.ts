@@ -10,6 +10,9 @@ export const MODES: Array<{ value: ChatMode; label: string }> = [
 export const STEP_LABELS = [
   "Receive",
   "Plan",
+  "Retrieve",
+  "Retrieval started",
+  "Retrieval completed",
   "Respond",
   "Tool requested",
   "Tool executing",
@@ -27,6 +30,7 @@ export const TOOL_STEP_LABELS = {
 export const NODE_TO_STEP_LABEL: Record<string, (typeof STEP_LABELS)[number]> = {
   receive: "Receive",
   plan: "Plan",
+  retrieve: "Retrieve",
   respond: "Respond",
   verify: "Verify",
   finalize: "Finalize",
@@ -67,6 +71,8 @@ export const DECISION_LABELS: Record<string, string> = {
   outcome: "Outcome",
   tool_intent: "Tool Intent",
   tool_result: "Tool Result",
+  retrieval_chunks: "Retrieval",
+  grounding: "Grounding",
 };
 
 export const generateRunId = () => {

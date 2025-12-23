@@ -14,7 +14,9 @@ export type RunEventType =
   | "error.raised"
   | "tool.requested"
   | "tool.completed"
-  | "tool.failed";
+  | "tool.failed"
+  | "retrieval.started"
+  | "retrieval.completed";
 
 export interface RunEvent {
   id: string;
@@ -136,4 +138,34 @@ export function subscribeToRunEvents(
       source.close();
     },
   };
+}
+
+export interface RetrievedChunkState {
+  chunk_id: string;
+  document_id: string;
+  text: string;
+  score: number;
+  metadata: Record<string, unknown>;
+}
+
+export interface RunStatePayload {
+  run_id: string;
+  output_text: string;
+  retrieved_chunks?: RetrievedChunkState[];
+}
+
+export async function fetchRunState(
+  runId: string
+): Promise<RunStatePayload | null> {
+  const response = await fetch(`${getBackendUrl()}/runs/${runId}/state`, {
+    method: "GET",
+  });
+  if (response.status === 404) {
+    return null;
+  }
+  if (!response.ok) {
+    throw new Error(`Failed to load run state: ${response.status}`);
+  }
+  const payload = (await response.json()) as RunStatePayload;
+  return payload;
 }

@@ -46,7 +46,14 @@ export default function HomePage() {
           runOutcomeReason={chatRun.runOutcomeReason}
         />
         <div className="flex flex-col gap-4 md:flex-row">
-          <ResponsePanel output={chatRun.output} decisions={chatRun.decisions} />
+          <ResponsePanel
+            output={chatRun.output}
+            finalText={chatRun.finalText}
+            decisions={chatRun.decisions}
+            retrievedChunks={chatRun.retrievedChunks}
+            retrievalAttempted={chatRun.retrievalAttempted}
+            runComplete={chatRun.runComplete}
+          />
           <StepsPanel steps={chatRun.orderedSteps} />
         </div>
         {chatRun.runError ? (

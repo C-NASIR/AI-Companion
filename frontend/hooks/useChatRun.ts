@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  fetchRunState,
   startRunRequest,
   subscribeToRunEvents,
   type ChatMode,
@@ -19,7 +20,10 @@ import {
   type StatusValue,
   type StepStateMap,
 } from "../lib/chatUiConstants";
-import type { DecisionEntry } from "../lib/chatTypes";
+import type {
+  DecisionEntry,
+  RetrievedChunkEntry,
+} from "../lib/chatTypes";
 
 export interface SubmissionMeta {
   message: string;
@@ -81,6 +85,10 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
   const [decisions, setDecisions] = useState<DecisionEntry[]>([]);
   const [runOutcome, setRunOutcome] = useState<string | null>(null);
   const [runOutcomeReason, setRunOutcomeReason] = useState<string | null>(null);
+  const [retrievedChunks, setRetrievedChunks] = useState<RetrievedChunkEntry[]>(
+    []
+  );
+  const [retrievalAttempted, setRetrievalAttempted] = useState(false);
 
   const [formError, setFormError] = useState<string | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
@@ -149,6 +157,8 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
     setRunOutcomeReason(null);
     setRunComplete(false);
     setRunError(null);
+    setRetrievedChunks([]);
+    setRetrievalAttempted(false);
     lastSeqRef.current = 0;
   }, []);
 
@@ -219,6 +229,24 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
             ts: event.ts,
           },
         ]);
+        break;
+      }
+
+      case "retrieval.started": {
+        setRetrievalAttempted(true);
+        setSteps((prev) => ({
+          ...prev,
+          "Retrieval started": "completed",
+          "Retrieval completed": "started",
+        }));
+        break;
+      }
+
+      case "retrieval.completed": {
+        setSteps((prev) => ({
+          ...prev,
+          "Retrieval completed": "completed",
+        }));
         break;
       }
 
@@ -300,6 +328,33 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
     connectToRunEvents(stored.runId);
   }, [connectToRunEvents, resetRunView]);
 
+  useEffect(() => {
+    if (!runComplete || !currentRunId) {
+      return;
+    }
+    let cancelled = false;
+    fetchRunState(currentRunId)
+      .then((payload) => {
+        if (cancelled || !payload) {
+          return;
+        }
+        const chunks = Array.isArray(payload.retrieved_chunks)
+          ? (payload.retrieved_chunks as RetrievedChunkEntry[])
+          : [];
+        if (!cancelled) {
+          setRetrievedChunks(chunks);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setRetrievedChunks([]);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [runComplete, currentRunId]);
+
   const handleSend = useCallback(async () => {
     const trimmedMessage = message.trim();
     const trimmedContext = context.trim();
@@ -367,5 +422,7 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
     runOutcome,
     runOutcomeReason,
     statusDisplay,
+    retrievedChunks,
+    retrievalAttempted,
   };
 };

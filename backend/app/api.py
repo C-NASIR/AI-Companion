@@ -1,4 +1,4 @@
-"""API router for Session 3 event-driven backend."""
+"""API router for Session 5 event-driven backend."""
 
 from __future__ import annotations
 
@@ -12,6 +12,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from .coordinator import RunCoordinator
 from .events import EventBus, EventStore, sse_event_stream
+from .ingestion import EmbeddingGenerator
+from .retrieval import InMemoryRetrievalStore, configure_retrieval_store
 from .schemas import ChatRequest, FeedbackRequest, iso_timestamp
 from .state import RunState
 from .state_store import StateStore
@@ -28,7 +30,10 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 EVENT_STORE = EventStore(EVENTS_DIR)
 EVENT_BUS = EventBus(EVENT_STORE)
 STATE_STORE = StateStore(STATE_DIR)
-RUN_COORDINATOR = RunCoordinator(EVENT_BUS, STATE_STORE)
+EMBEDDING_GENERATOR = EmbeddingGenerator()
+RETRIEVAL_STORE = InMemoryRetrievalStore(EMBEDDING_GENERATOR.embed)
+configure_retrieval_store(RETRIEVAL_STORE)
+RUN_COORDINATOR = RunCoordinator(EVENT_BUS, STATE_STORE, RETRIEVAL_STORE)
 
 
 def _log(message: str, run_id: str, *args: object) -> None:

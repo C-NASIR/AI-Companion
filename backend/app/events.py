@@ -7,7 +7,7 @@ import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 from uuid import uuid4
 import threading
 
@@ -58,6 +58,15 @@ class ToolFailedPayload(BaseModel):
     tool_name: str
     error: dict[str, Any]
     duration_ms: int = Field(ge=0)
+
+
+class RetrievalCompletedPayload(BaseModel):
+    """Data stored with retrieval.completed events."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    number_of_chunks: int = Field(ge=0)
+    chunk_ids: list[str]
 
 
 def new_event(event_type: str, run_id: str, data: Mapping[str, Any]) -> Event:
@@ -112,6 +121,25 @@ def tool_failed_event(
         duration_ms=max(int(duration_ms), 0),
     ).model_dump()
     return new_event("tool.failed", run_id, payload)
+
+
+def retrieval_started_event(run_id: str, query: str | None = None) -> Event:
+    """Helper to emit retrieval.started events."""
+    payload: dict[str, Any] = {}
+    if query is not None:
+        payload["query"] = query
+    payload["query_length"] = len(query or "")
+    return new_event("retrieval.started", run_id, payload)
+
+
+def retrieval_completed_event(
+    run_id: str, chunk_ids: Sequence[str]
+) -> Event:
+    """Helper to emit retrieval.completed events."""
+    payload = RetrievalCompletedPayload(
+        number_of_chunks=len(chunk_ids), chunk_ids=list(chunk_ids)
+    ).model_dump()
+    return new_event("retrieval.completed", run_id, payload)
 
 
 class EventStore:

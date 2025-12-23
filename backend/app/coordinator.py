@@ -8,6 +8,7 @@ from typing import Callable, Mapping
 
 from .events import Event, EventBus, new_event
 from .intelligence import GRAPH, NODE_MAP, NodeContext
+from .retrieval import RetrievalStore
 from .state import RunPhase, RunState
 from .state_store import StateStore
 
@@ -23,9 +24,15 @@ NEXT_NODE: dict[str, str | None] = {
 class RunCoordinator:
     """Coordinates node execution driven by the event log."""
 
-    def __init__(self, bus: EventBus, state_store: StateStore):
+    def __init__(
+        self,
+        bus: EventBus,
+        state_store: StateStore,
+        retrieval_store: RetrievalStore,
+    ):
         self.bus = bus
         self.state_store = state_store
+        self.retrieval_store = retrieval_store
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
     async def start_run(self, state: RunState) -> None:
@@ -42,7 +49,7 @@ class RunCoordinator:
             await queue.put(event)
 
         unsubscribe = self.bus.subscribe(run_id, _subscriber)
-        ctx = NodeContext(self.bus, self.state_store)
+        ctx = NodeContext(self.bus, self.state_store, self.retrieval_store)
         task = asyncio.create_task(
             self._run_loop(state, queue, unsubscribe, ctx), name=f"run-{run_id}"
         )

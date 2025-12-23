@@ -6,3 +6,11 @@ export interface DecisionEntry {
   notes?: string;
   ts: string;
 }
+
+export interface RetrievedChunkEntry {
+  chunk_id: string;
+  document_id: string;
+  text: string;
+  score: number;
+  metadata: Record<string, unknown>;
+}

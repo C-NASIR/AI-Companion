@@ -1,4 +1,4 @@
-"""FastAPI application bootstrap for Session 0 backend."""
+"""FastAPI application bootstrap for Session 5 backend."""
 
 from __future__ import annotations
 
@@ -7,8 +7,9 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api import EVENT_BUS, router
+from .api import EMBEDDING_GENERATOR, EVENT_BUS, RETRIEVAL_STORE, router
 from .executor import ToolExecutor
+from .ingestion import run_ingestion
 from .tools import get_tool_registry
 
 
@@ -52,6 +53,18 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     async def _startup() -> None:
         await TOOL_EXECUTOR.start()
+        stats = await run_ingestion(
+            RETRIEVAL_STORE,
+            embedder=EMBEDDING_GENERATOR,
+            event_bus=EVENT_BUS,
+        )
+        logger = logging.getLogger(__name__)
+        logger.info(
+            "knowledge ingestion ready documents=%s chunks=%s",
+            stats.get("documents_ingested"),
+            stats.get("chunks_indexed"),
+            extra={"run_id": "system"},
+        )
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:

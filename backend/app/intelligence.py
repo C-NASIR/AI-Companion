@@ -7,10 +7,17 @@ import logging
 import re
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Mapping
+from typing import Awaitable, Callable, Mapping, Sequence
 
-from .events import EventBus, new_event, tool_requested_event
+from .events import (
+    EventBus,
+    new_event,
+    retrieval_completed_event,
+    retrieval_started_event,
+    tool_requested_event,
+)
 from .model import stream_chat
+from .retrieval import RetrievalStore
 from .schemas import ChatMode
 from .state import PlanType, RunPhase, RunState
 from .state_store import StateStore
@@ -18,6 +25,7 @@ from .state_store import StateStore
 logger = logging.getLogger(__name__)
 
 NodeFunc = Callable[[RunState, "NodeContext"], Awaitable[RunState]]
+RETRIEVAL_TOP_K = 3
 
 
 @dataclass(frozen=True)
@@ -32,9 +40,15 @@ class NodeSpec:
 class NodeContext:
     """Shared helpers for node logic."""
 
-    def __init__(self, bus: EventBus, state_store: StateStore):
+    def __init__(
+        self,
+        bus: EventBus,
+        state_store: StateStore,
+        retrieval_store: RetrievalStore,
+    ):
         self.bus = bus
         self.state_store = state_store
+        self.retrieval_store = retrieval_store
 
     async def emit(self, state: RunState, event_type: str, data: Mapping[str, object]) -> None:
         """Publish an event through the bus."""
@@ -124,10 +138,54 @@ async def plan_node(state: RunState, ctx: NodeContext) -> RunState:
     return state
 
 
-async def _stream_direct_answer(state: RunState, ctx: NodeContext) -> None:
+def _build_retrieval_query(state: RunState) -> str:
+    message = state.message.strip()
+    if state.context:
+        context = state.context.strip()
+        return f"{message}\n\nContext:\n{context}"
+    return message
+
+
+async def retrieve_node(state: RunState, ctx: NodeContext) -> RunState:
+    """Fetch supporting evidence."""
+    async with ctx.node_scope(state, "retrieve", RunPhase.RETRIEVE):
+        query = _build_retrieval_query(state)
+        await ctx.bus.publish(retrieval_started_event(state.run_id, query))
+        _log(
+            state.run_id,
+            "retrieval querying top_k=%s query_length=%s",
+            RETRIEVAL_TOP_K,
+            len(query),
+        )
+        try:
+            chunks = ctx.retrieval_store.query(query, top_k=RETRIEVAL_TOP_K)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            message = f"retrieval_failed: {exc}"
+            await ctx.emit_error(state, "retrieve", message)
+            _log(state.run_id, "retrieval error=%s", exc)
+            raise
+        state.set_retrieved_chunks(chunks)
+        chunk_ids = [chunk.chunk_id for chunk in chunks]
+        await ctx.bus.publish(retrieval_completed_event(state.run_id, chunk_ids))
+        decision_value = str(len(chunk_ids))
+        notes = f"{decision_value} chunk(s) retrieved"
+        state.record_decision("retrieval_chunks", decision_value, notes=notes)
+        await ctx.emit_decision(state, "retrieval_chunks", decision_value, notes)
+    return state
+
+
+async def _stream_direct_answer(
+    state: RunState,
+    ctx: NodeContext,
+    retrieved_chunks: Sequence[Mapping[str, Any]],
+) -> None:
     first_chunk = True
     async for chunk in stream_chat(
-        state.message, state.context, state.mode, state.run_id
+        state.message,
+        state.context,
+        state.mode,
+        state.run_id,
+        retrieved_chunks,
     ):
         if first_chunk:
             await ctx.emit_status(state, "responding")
@@ -316,7 +374,8 @@ async def respond_node(state: RunState, ctx: NodeContext) -> RunState:
             return state
 
         if plan == PlanType.DIRECT_ANSWER:
-            await _stream_direct_answer(state, ctx)
+            retrieved_chunks = state.retrieved_chunks
+            await _stream_direct_answer(state, ctx, retrieved_chunks)
             strategy = "model_stream"
             notes = None
         elif plan == PlanType.NEEDS_CLARIFICATION:
@@ -345,7 +404,14 @@ async def verify_node(state: RunState, ctx: NodeContext) -> RunState:
     """Perform lightweight verification."""
     async with ctx.node_scope(state, "verify", RunPhase.VERIFY):
         await _append_tool_summary_if_needed(state, ctx)
-        passed, reason = _evaluate_verification(state)
+        grounding_passed, grounding_reason = _evaluate_grounding_requirements(state)
+        grounding_value = "pass" if grounding_passed else "fail"
+        state.record_decision("grounding", grounding_value, notes=grounding_reason)
+        await ctx.emit_decision(state, "grounding", grounding_value, grounding_reason)
+        if grounding_passed:
+            passed, reason = _evaluate_general_verification(state)
+        else:
+            passed, reason = False, grounding_reason
         state.set_verification(passed=passed, reason=reason)
         decision_value = "pass" if passed else "fail"
         state.record_decision("verification", decision_value, notes=reason)
@@ -354,7 +420,30 @@ async def verify_node(state: RunState, ctx: NodeContext) -> RunState:
     return state
 
 
-def _evaluate_verification(state: RunState) -> tuple[bool, str | None]:
+_CITATION_PATTERN = re.compile(r"\[([\w\-\.:]+)\]")
+
+
+def _extract_cited_chunk_ids(text: str) -> list[str]:
+    if not text:
+        return []
+    return _CITATION_PATTERN.findall(text)
+
+
+def _evaluate_grounding_requirements(state: RunState) -> tuple[bool, str | None]:
+    retrieved = state.retrieved_chunks
+    if not retrieved:
+        return True, None
+    citations = _extract_cited_chunk_ids(state.output_text)
+    if not citations:
+        return False, "missing_citations"
+    valid_ids = {chunk.chunk_id for chunk in retrieved}
+    invalid = [citation for citation in citations if citation not in valid_ids]
+    if invalid:
+        return False, "invalid_citation"
+    return True, None
+
+
+def _evaluate_general_verification(state: RunState) -> tuple[bool, str | None]:
     if state.last_tool_status == "completed":
         return True, None
     if state.last_tool_status == "failed":
@@ -396,6 +485,7 @@ async def finalize_node(state: RunState, ctx: NodeContext) -> RunState:
 GRAPH: list[NodeSpec] = [
     NodeSpec("receive", RunPhase.RECEIVE, receive_node),
     NodeSpec("plan", RunPhase.PLAN, plan_node),
+    NodeSpec("retrieve", RunPhase.RETRIEVE, retrieve_node),
     NodeSpec("respond", RunPhase.RESPOND, respond_node),
     NodeSpec("verify", RunPhase.VERIFY, verify_node),
     NodeSpec("finalize", RunPhase.FINALIZE, finalize_node),

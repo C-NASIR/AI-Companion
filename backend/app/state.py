@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -35,6 +35,7 @@ class RunPhase(str, Enum):
     INIT = "init"
     RECEIVE = "receive"
     PLAN = "plan"
+    RETRIEVE = "retrieve"
     RESPOND = "respond"
     WAITING_FOR_TOOL = "waiting_for_tool"
     VERIFY = "verify"
@@ -95,6 +96,7 @@ class RunState(BaseModel):
     tool_requests: list[ToolRequestRecord] = Field(default_factory=list)
     tool_results: list[ToolResultRecord] = Field(default_factory=list)
     last_tool_status: str | None = None
+    retrieved_chunks: list["RetrievedChunkRecord"] = Field(default_factory=list)
 
     @classmethod
     def new(
@@ -193,3 +195,49 @@ class RunState(BaseModel):
         self.outcome = outcome
         self.outcome_reason = reason
         self._touch()
+
+    def set_retrieved_chunks(
+        self, chunks: Sequence["RetrievedChunkRecord"] | Sequence[Mapping[str, Any]]
+    ) -> None:
+        """Persist retrieval results as structured records."""
+        normalized: list[RetrievedChunkRecord] = []
+        for chunk in chunks:
+            if isinstance(chunk, RetrievedChunkRecord):
+                normalized.append(chunk)
+                continue
+            if isinstance(chunk, Mapping):
+                chunk_id = chunk.get("chunk_id")
+                document_id = chunk.get("document_id")
+                text = chunk.get("text")
+                score = chunk.get("score")
+                metadata = chunk.get("metadata")
+            else:
+                chunk_id = getattr(chunk, "chunk_id", "")
+                document_id = getattr(chunk, "document_id", "")
+                text = getattr(chunk, "text", "")
+                score = getattr(chunk, "score", 0.0)
+                metadata = getattr(chunk, "metadata", {})
+            metadata_dict = dict(metadata) if isinstance(metadata, Mapping) else {}
+            normalized.append(
+                RetrievedChunkRecord(
+                    chunk_id=str(chunk_id),
+                    document_id=str(document_id),
+                    text=str(text or ""),
+                    score=float(score or 0.0),
+                    metadata=metadata_dict,
+                )
+            )
+        self.retrieved_chunks = normalized
+        self._touch()
+
+
+class RetrievedChunkRecord(BaseModel):
+    """Stored representation of retrieved chunk metadata."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    chunk_id: str
+    document_id: str
+    text: str
+    score: float
+    metadata: dict[str, Any]
