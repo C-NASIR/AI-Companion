@@ -14,8 +14,10 @@ from .events import (
     new_event,
     retrieval_completed_event,
     retrieval_started_event,
+    tool_discovered_event,
     tool_requested_event,
 )
+from .mcp.schema import ToolDescriptor
 from .model import stream_chat
 from .retrieval import RetrievalStore
 from .schemas import ChatMode
@@ -45,10 +47,12 @@ class NodeContext:
         bus: EventBus,
         state_store: StateStore,
         retrieval_store: RetrievalStore,
+        allowed_tools_provider: Callable[[RunState], Sequence[ToolDescriptor]] | None = None,
     ):
         self.bus = bus
         self.state_store = state_store
         self.retrieval_store = retrieval_store
+        self._allowed_tools_provider = allowed_tools_provider
 
     async def emit(self, state: RunState, event_type: str, data: Mapping[str, object]) -> None:
         """Publish an event through the bus."""
@@ -78,6 +82,12 @@ class NodeContext:
     def save_state(self, state: RunState) -> None:
         """Persist the latest snapshot."""
         self.state_store.save(state)
+
+    def allowed_tools(self, state: RunState) -> list[ToolDescriptor]:
+        """Return the list of allowed tools for this run."""
+        if not self._allowed_tools_provider:
+            return []
+        return list(self._allowed_tools_provider(state))
 
     @asynccontextmanager
     async def node_scope(self, state: RunState, name: str, phase: RunPhase):
@@ -135,6 +145,59 @@ async def plan_node(state: RunState, ctx: NodeContext) -> RunState:
         state.record_decision("plan_type", plan_type.value, notes=reason)
         await ctx.emit_decision(state, "plan_type", plan_type.value, reason)
         _log(state.run_id, "plan decided plan=%s reason=%s", plan_type.value, reason)
+
+        allowed_tools = ctx.allowed_tools(state)
+        state.set_available_tools(allowed_tools)
+        tool_names = [descriptor.name for descriptor in allowed_tools]
+        available_value = ", ".join(tool_names) if tool_names else "none"
+        notes = f"{len(tool_names)} tool(s) available"
+        state.record_decision("available_tools", available_value, notes=notes)
+        await ctx.emit_decision(state, "available_tools", available_value, notes)
+        for descriptor in allowed_tools:
+            await ctx.bus.publish(
+                tool_discovered_event(
+                    state.run_id,
+                    tool_name=descriptor.name,
+                    source=descriptor.source,
+                    permission_scope=descriptor.permission_scope,
+                )
+            )
+
+        tool_selection = None
+        if plan_type == PlanType.DIRECT_ANSWER:
+            tool_selection = _match_tool_intent(state.message, allowed_tools)
+        selected_name = tool_selection[0].name if tool_selection else "none"
+        selection_notes = (
+            f"{selected_name} selected" if tool_selection else "no matching tool"
+        )
+        state.record_decision("tool_selected", selected_name, notes=selection_notes)
+        await ctx.emit_decision(state, "tool_selected", selected_name, selection_notes)
+        if tool_selection:
+            descriptor, arguments = tool_selection
+            state.record_tool_request(
+                name=descriptor.name,
+                arguments=arguments,
+                source=descriptor.source,
+                permission_scope=descriptor.permission_scope,
+            )
+            state.transition_phase(RunPhase.WAITING_FOR_TOOL)
+            await ctx.emit_status(state, "thinking")
+            await ctx.bus.publish(
+                tool_requested_event(
+                    state.run_id,
+                    tool_name=descriptor.name,
+                    arguments=arguments,
+                    source=descriptor.source,
+                    permission_scope=descriptor.permission_scope,
+                )
+            )
+            _log(
+                state.run_id,
+                "requested tool name=%s args=%s",
+                descriptor.name,
+                arguments,
+            )
+            return state
     return state
 
 
@@ -282,6 +345,102 @@ def _detect_calculator_request(message: str) -> dict[str, float] | None:
     return _match_keyword_expression(message)
 
 
+_REPO_KEYWORD_PATTERN = re.compile(
+    r"(?:repo|repository)\s+(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)",
+    re.IGNORECASE,
+)
+_REPO_URL_PATTERN = re.compile(
+    r"github\.com/(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)",
+    re.IGNORECASE,
+)
+_REPO_LOOSE_PATTERN = re.compile(r"\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\b")
+_PATH_HINT_PATTERN = re.compile(
+    r"(?:path|directory|folder)\s+(?P<path>[A-Za-z0-9_.\-/]+)",
+    re.IGNORECASE,
+)
+_FILE_HINT_PATTERN = re.compile(
+    r"file\s+(?:at\s+|from\s+)?(?P<path>[A-Za-z0-9_.\-/]+)",
+    re.IGNORECASE,
+)
+
+
+def _extract_repo_identifier(message: str) -> str | None:
+    url_match = _REPO_URL_PATTERN.search(message)
+    if url_match:
+        return url_match.group("repo")
+    keyword_match = _REPO_KEYWORD_PATTERN.search(message)
+    if keyword_match:
+        return keyword_match.group("repo")
+    lowered = message.lower()
+    if "repo" in lowered or "repository" in lowered or "github" in lowered:
+        loose_match = _REPO_LOOSE_PATTERN.search(message)
+        if loose_match:
+            return loose_match.group(1)
+    return None
+
+
+def _extract_path_hint(message: str) -> str | None:
+    match = _PATH_HINT_PATTERN.search(message)
+    if match:
+        return match.group("path").strip().strip("\"'")
+    return None
+
+
+def _extract_file_path(message: str) -> str | None:
+    match = _FILE_HINT_PATTERN.search(message)
+    if not match:
+        return None
+    return match.group("path").strip().strip("\"'")
+
+
+def _detect_github_list_files(message: str) -> dict[str, str] | None:
+    lowered = message.lower()
+    if not any(keyword in lowered for keyword in ("list", "show", "what are")):
+        return None
+    if not any(keyword in lowered for keyword in ("file", "files", "folder", "directory")):
+        return None
+    repo = _extract_repo_identifier(message)
+    if not repo:
+        return None
+    payload: dict[str, str] = {"repo": repo}
+    path = _extract_path_hint(message)
+    if path:
+        payload["path"] = path
+    return payload
+
+
+def _detect_github_read_file(message: str) -> dict[str, str] | None:
+    lowered = message.lower()
+    if not any(keyword in lowered for keyword in ("read", "open", "show", "view")):
+        return None
+    if "file" not in lowered:
+        return None
+    repo = _extract_repo_identifier(message)
+    if not repo:
+        return None
+    path = _extract_file_path(message) or _extract_path_hint(message)
+    if not path:
+        return None
+    return {"repo": repo, "path": path}
+
+
+def _match_tool_intent(
+    message: str, allowed_tools: Sequence[ToolDescriptor]
+) -> tuple[ToolDescriptor, dict[str, object]] | None:
+    for descriptor in allowed_tools:
+        if descriptor.name == "calculator":
+            args = _detect_calculator_request(message)
+        elif descriptor.name == "github.list_files":
+            args = _detect_github_list_files(message)
+        elif descriptor.name == "github.read_file":
+            args = _detect_github_read_file(message)
+        else:
+            args = None
+        if args:
+            return descriptor, args
+    return None
+
+
 def _latest_completed_tool(state: RunState):
     for record in reversed(state.tool_results):
         if record.status == "completed":
@@ -351,28 +510,6 @@ async def respond_node(state: RunState, ctx: NodeContext) -> RunState:
     async with ctx.node_scope(state, "respond", RunPhase.RESPOND):
         plan = state.plan_type or PlanType.DIRECT_ANSWER
         _log(state.run_id, "respond strategy=%s", plan.value)
-        calculator_args = None
-        if plan == PlanType.DIRECT_ANSWER:
-            calculator_args = _detect_calculator_request(state.message)
-
-        intent_value = "calculator" if calculator_args else "none"
-        state.record_decision("tool_intent", intent_value)
-        await ctx.emit_decision(state, "tool_intent", intent_value)
-
-        if calculator_args:
-            state.record_tool_request(name="calculator", arguments=calculator_args)
-            state.transition_phase(RunPhase.WAITING_FOR_TOOL)
-            await ctx.emit_status(state, "thinking")
-            await ctx.bus.publish(
-                tool_requested_event(
-                    state.run_id,
-                    tool_name="calculator",
-                    arguments=calculator_args,
-                )
-            )
-            _log(state.run_id, "requested calculator tool args=%s", calculator_args)
-            return state
-
         if plan == PlanType.DIRECT_ANSWER:
             retrieved_chunks = state.retrieved_chunks
             await _stream_direct_answer(state, ctx, retrieved_chunks)

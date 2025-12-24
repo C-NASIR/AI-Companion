@@ -42,6 +42,17 @@ class RunPhase(str, Enum):
     FINALIZE = "finalize"
 
 
+class AvailableToolRecord(BaseModel):
+    """Metadata stored for tools available during a run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    source: str
+    permission_scope: str
+    server_id: str | None = None
+
+
 class ToolRequestRecord(BaseModel):
     """Recorded intent for a tool invocation."""
 
@@ -96,6 +107,11 @@ class RunState(BaseModel):
     tool_requests: list[ToolRequestRecord] = Field(default_factory=list)
     tool_results: list[ToolResultRecord] = Field(default_factory=list)
     last_tool_status: str | None = None
+    available_tools: list[AvailableToolRecord] = Field(default_factory=list)
+    requested_tool: str | None = None
+    tool_source: str | None = None
+    tool_permission_scope: str | None = None
+    tool_denied_reason: str | None = None
     retrieved_chunks: list["RetrievedChunkRecord"] = Field(default_factory=list)
 
     @classmethod
@@ -140,13 +156,66 @@ class RunState(BaseModel):
         self.decisions.append(DecisionRecord(name=name, value=value, notes=notes))
         self._touch()
 
+    def set_available_tools(
+        self, tools: Sequence[AvailableToolRecord] | Sequence[Mapping[str, Any]]
+    ) -> None:
+        """Persist normalized metadata for allowed tools."""
+        normalized: list[AvailableToolRecord] = []
+        for tool in tools:
+            if isinstance(tool, AvailableToolRecord):
+                normalized.append(tool)
+                continue
+            if isinstance(tool, Mapping):
+                name = str(tool.get("name") or "")
+                source = str(tool.get("source") or "")
+                scope = str(tool.get("permission_scope") or "")
+                server_id = tool.get("server_id")
+            else:
+                name = getattr(tool, "name", "")
+                source = getattr(tool, "source", "")
+                scope = getattr(tool, "permission_scope", "")
+                server_id = getattr(tool, "server_id", None)
+            normalized.append(
+                AvailableToolRecord(
+                    name=name,
+                    source=source,
+                    permission_scope=scope,
+                    server_id=str(server_id) if server_id is not None else None,
+                )
+            )
+        self.available_tools = normalized
+        self._touch()
+
+    def set_tool_context(
+        self,
+        *,
+        name: str,
+        source: str | None,
+        permission_scope: str | None,
+    ) -> None:
+        """Store metadata about the active tool request."""
+        self.requested_tool = name
+        if source:
+            self.tool_source = source
+        if permission_scope:
+            self.tool_permission_scope = permission_scope
+        self.tool_denied_reason = None
+        self._touch()
+
     def record_tool_request(
-        self, *, name: str, arguments: Mapping[str, Any], status: str = "requested"
+        self,
+        *,
+        name: str,
+        arguments: Mapping[str, Any],
+        status: str = "requested",
+        source: str | None = None,
+        permission_scope: str | None = None,
     ) -> None:
         """Persist metadata for a requested tool invocation."""
         self.tool_requests.append(
             ToolRequestRecord(name=name, arguments=dict(arguments))
         )
+        self.set_tool_context(name=name, source=source, permission_scope=permission_scope)
         self.last_tool_status = status
         self._touch()
 
@@ -170,11 +239,18 @@ class RunState(BaseModel):
         if status == "completed":
             record_kwargs["output"] = dict(payload)
             record_kwargs["error"] = None
+            self.tool_denied_reason = None
         else:
             record_kwargs["error"] = dict(payload)
             record_kwargs["output"] = None
         self.tool_results.append(ToolResultRecord(**record_kwargs))
         self.last_tool_status = status
+        self._touch()
+
+    def set_tool_denied(self, reason: str) -> None:
+        """Record that a tool request was denied."""
+        self.tool_denied_reason = reason
+        self.last_tool_status = "denied"
         self._touch()
 
     def set_plan_type(self, plan_type: PlanType) -> None:

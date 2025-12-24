@@ -1,3 +1,5 @@
+import type { AvailableToolEntry as BackendAvailableToolEntry } from "./backend";
+
 export type StepVisualState = "pending" | "started" | "completed" | "failed";
 
 export interface DecisionEntry {
@@ -13,4 +15,14 @@ export interface RetrievedChunkEntry {
   text: string;
   score: number;
   metadata: Record<string, unknown>;
+}
+
+export type AvailableToolEntry = BackendAvailableToolEntry;
+
+export interface ToolContextState {
+  requestedTool: string | null;
+  toolSource: string | null;
+  toolPermissionScope: string | null;
+  toolDeniedReason: string | null;
+  lastToolStatus: string | null;
 }

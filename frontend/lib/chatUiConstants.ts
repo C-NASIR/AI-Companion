@@ -14,17 +14,19 @@ export const STEP_LABELS = [
   "Retrieval started",
   "Retrieval completed",
   "Respond",
+  "Tool discovered",
   "Tool requested",
-  "Tool executing",
-  "Tool completed",
+  "Tool executed",
+  "Tool denied",
   "Verify",
   "Finalize",
 ] as const;
 
 export const TOOL_STEP_LABELS = {
+  discovered: "Tool discovered",
   requested: "Tool requested",
-  executing: "Tool executing",
-  completed: "Tool completed",
+  executed: "Tool executed",
+  denied: "Tool denied",
 } as const;
 
 export const NODE_TO_STEP_LABEL: Record<string, (typeof STEP_LABELS)[number]> = {
@@ -69,7 +71,8 @@ export const DECISION_LABELS: Record<string, string> = {
   response_strategy: "Response Strategy",
   verification: "Verification",
   outcome: "Outcome",
-  tool_intent: "Tool Intent",
+  tool_selected: "Tool Selection",
+  available_tools: "Available Tools",
   tool_result: "Tool Result",
   retrieval_chunks: "Retrieval",
   grounding: "Grounding",

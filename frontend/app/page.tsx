@@ -53,6 +53,8 @@ export default function HomePage() {
             retrievedChunks={chatRun.retrievedChunks}
             retrievalAttempted={chatRun.retrievalAttempted}
             runComplete={chatRun.runComplete}
+            availableTools={chatRun.availableTools}
+            toolContext={chatRun.toolContext}
           />
           <StepsPanel steps={chatRun.orderedSteps} />
         </div>

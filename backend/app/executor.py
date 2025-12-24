@@ -1,4 +1,4 @@
-"""Tool executor service: subscribes to tool.requested and emits results."""
+"""Tool executor that routes requests through the MCP client."""
 
 from __future__ import annotations
 
@@ -7,31 +7,39 @@ import logging
 import time
 from typing import Callable, Mapping
 
-from pydantic import ValidationError
-
 from .events import (
     Event,
     EventBus,
     tool_completed_event,
+    tool_denied_event,
     tool_failed_event,
+    tool_server_error_event,
 )
-from .tools import (
-    ToolExecutionError,
-    ToolRegistry,
-    ToolErrorModel,
-    ToolOutputModel,
-    validate_tool_arguments,
-)
+from .mcp.client import MCPClient
+from .mcp.registry import MCPRegistry
+from .mcp.server import MCPServerError
+from .permissions import PermissionGate
+from .state_store import StateStore
 
 logger = logging.getLogger(__name__)
 
 
 class ToolExecutor:
-    """Executes registered tools in response to tool.requested events."""
+    """Executes MCP tools in response to tool.requested events."""
 
-    def __init__(self, bus: EventBus, registry: ToolRegistry):
+    def __init__(
+        self,
+        bus: EventBus,
+        registry: MCPRegistry,
+        client: MCPClient,
+        permission_gate: PermissionGate,
+        state_store: StateStore,
+    ):
         self.bus = bus
         self.registry = registry
+        self.client = client
+        self.permission_gate = permission_gate
+        self.state_store = state_store
         self._queue: asyncio.Queue[Event] | None = None
         self._task: asyncio.Task[None] | None = None
         self._unsubscribe: Callable[[], None] | None = None
@@ -97,8 +105,8 @@ class ToolExecutor:
             )
             return
 
-        spec = self.registry.get(tool_name)
-        if not spec:
+        descriptor = self.registry.get_tool(tool_name)
+        if not descriptor:
             await self._emit_failure(
                 run_id,
                 tool_name,
@@ -107,48 +115,57 @@ class ToolExecutor:
             )
             return
 
+        permission_context = self._permission_context_for_run(run_id)
+        allowed, reason = self.permission_gate.is_allowed(
+            descriptor.permission_scope, permission_context
+        )
+        if not allowed:
+            await self._emit_denied(
+                run_id,
+                tool_name,
+                descriptor.permission_scope,
+                reason or "permission_denied",
+            )
+            return
+
         start = time.perf_counter()
-
         try:
-            validated_args = validate_tool_arguments(spec, arguments)
-        except ValidationError as exc:
-            message = "invalid_arguments"
-            logger.warning(
-                "tool arg validation failed tool=%s errors=%s",
-                tool_name,
-                exc.errors(),
-                extra={"run_id": run_id},
-            )
-            await self._emit_failure(
-                run_id,
-                tool_name,
-                spec.error_model(error=message),
-                duration_ms=self._duration_ms(start),
-            )
-            return
-
-        try:
-            output = spec.execute(validated_args)
-            if not isinstance(output, ToolOutputModel):
-                output = spec.output_model.model_validate(  # type: ignore[arg-type]
-                    output
+            result = await self.client.execute_tool(tool_name, arguments)
+        except MCPServerError as exc:
+            await self.bus.publish(
+                tool_server_error_event(
+                    run_id,
+                    server_id=descriptor.server_id,
+                    error=exc.details or {"error": str(exc)},
                 )
-        except ToolExecutionError as exc:
+            )
             await self._emit_failure(
                 run_id,
                 tool_name,
-                spec.error_model.model_validate(exc.error_payload.model_dump()),
+                {"error": "server_error"},
                 duration_ms=self._duration_ms(start),
             )
+            logger.warning(
+                "tool server error tool=%s server=%s", tool_name, descriptor.server_id, extra={"run_id": run_id}
+            )
             return
-        except Exception:
+        except Exception:  # pragma: no cover - defensive guard
             logger.exception(
                 "tool execution crashed tool=%s", tool_name, extra={"run_id": run_id}
             )
             await self._emit_failure(
                 run_id,
                 tool_name,
-                spec.error_model(error="execution_error"),
+                {"error": "execution_error"},
+                duration_ms=self._duration_ms(start),
+            )
+            return
+
+        if result.error:
+            await self._emit_failure(
+                run_id,
+                tool_name,
+                result.error,
                 duration_ms=self._duration_ms(start),
             )
             return
@@ -156,7 +173,7 @@ class ToolExecutor:
         await self._emit_success(
             run_id,
             tool_name,
-            output,
+            result.output or {},
             duration_ms=self._duration_ms(start),
         )
 
@@ -164,14 +181,13 @@ class ToolExecutor:
         self,
         run_id: str,
         tool_name: str,
-        output: ToolOutputModel,
+        output: Mapping[str, object],
         *,
         duration_ms: int,
     ) -> None:
-        payload = output.model_dump()
         await self.bus.publish(
             tool_completed_event(
-                run_id, tool_name=tool_name, output=payload, duration_ms=duration_ms
+                run_id, tool_name=tool_name, output=dict(output), duration_ms=duration_ms
             )
         )
         logger.info(
@@ -185,17 +201,13 @@ class ToolExecutor:
         self,
         run_id: str,
         tool_name: str,
-        error: ToolErrorModel | Mapping[str, object],
+        error: Mapping[str, object],
         *,
         duration_ms: int,
     ) -> None:
-        if isinstance(error, ToolErrorModel):
-            error_payload = error.model_dump()
-        else:
-            error_payload = dict(error)
         await self.bus.publish(
             tool_failed_event(
-                run_id, tool_name=tool_name, error=error_payload, duration_ms=duration_ms
+                run_id, tool_name=tool_name, error=dict(error), duration_ms=duration_ms
             )
         )
         logger.info(
@@ -204,6 +216,30 @@ class ToolExecutor:
             duration_ms,
             extra={"run_id": run_id},
         )
+
+    async def _emit_denied(
+        self, run_id: str, tool_name: str, permission_scope: str, reason: str
+    ) -> None:
+        await self.bus.publish(
+            tool_denied_event(
+                run_id,
+                tool_name=tool_name,
+                permission_scope=permission_scope,
+                reason=reason,
+            )
+        )
+        logger.warning(
+            "tool denied tool=%s scope=%s reason=%s",
+            tool_name,
+            permission_scope,
+            reason,
+            extra={"run_id": run_id},
+        )
+
+    def _permission_context_for_run(self, run_id: str):
+        state = self.state_store.load(run_id)
+        run_type = state.mode.value if state else "answer"
+        return self.permission_gate.build_context(user_role="human", run_type=run_type)
 
     @staticmethod
     def _duration_ms(start: float) -> int:

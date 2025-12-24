@@ -1,6 +1,6 @@
 # AI Companion
 
-Session 5 keeps the event-driven backbone from earlier sessions and adds a Knowledge Foundation layer. Every backend startup ingests a small corpus under `backend/data/docs`, chunks and embeds it, and stores the embeddings in an in-memory retrieval store. The intelligence graph now routes through a dedicated `retrieve` node before responding, answers must cite chunk ids like `[document.md::000]`, verification enforces grounding, and the UI surfaces a Sources panel so you can inspect provenance alongside the streamed response.
+Session 6 keeps the event-driven backbone and knowledge foundation from earlier sessions but now routes every tool interaction through a Model Context Protocol (MCP) boundary with dynamic discovery, centralized permissions, and explicit provenance. Every backend startup still ingests the markdown corpus under `backend/data/docs`, yet intelligence now consults the MCP registry during planning, emits `tool.discovered` / `tool.requested` / `tool.denied` events, and the UI surfaces standardized tool metadata (name, scope, and source) together with denial messaging so users understand why a capability was or was not used.
 
 ## Repository layout
 
@@ -18,6 +18,7 @@ Session 5 keeps the event-driven backbone from earlier sessions and adds a Knowl
 - Node.js 18+ and npm
 - Docker + Docker Compose (for the one-command run flow)
 - (Optional) OpenAI API key for live streaming. Without it the backend emits a deterministic fake response.
+- (Optional) `GITHUB_TOKEN` for the external GitHub MCP server. Leave unset to exercise permission denial paths; when provided it enables `github.list_files` and `github.read_file`.
 
 ## Run everything with Docker Compose
 
@@ -65,6 +66,15 @@ Visit http://localhost:3000 and use the UI. When you click **Send**, the browser
 5. The respond node always sees an explicit evidence list. When chunks exist, they are formatted as a numbered list with chunk ids and passed verbatim to the model along with instructions to cite ids inline. When no chunks are retrieved it instructs the model to reply “I lack sufficient evidence to answer.”
 6. Verification parses the streamed output, ensures at least one chunk id is cited whenever retrieval succeeded, and rejects answers that mention unknown chunks via reasons `missing_citations` or `invalid_citation`.
 7. The frontend fetches the persisted RunState after completion, parses cited chunk ids, and renders a Sources section with document titles, chunk ids, and expandable chunk previews. If retrieval never ran or returned zero chunks the panel shows “No sources were used for this answer.”
+
+### Tool connectivity, MCP, and permissions
+
+1. `backend/app/mcp/` hosts the MCP schema models (`schema.py`), registry (`registry.py`), client (`client.py`), abstract server contract (`server.py`), and concrete servers under `servers/`. Two servers are registered at startup: `CalculatorMCPServer` (local arithmetic) and `GitHubMCPServer` (read-only repo access via the GitHub REST API and the `GITHUB_TOKEN` env var).
+2. `backend/app/permissions.py` defines a `PermissionGate` and `PermissionContext` that enforce scopes mechanically outside of intelligence. Calculators are always allowed, `github.read` is allowed only in `development`, and any future scope defaults to deny.
+3. `backend/app/intelligence.py` planning consults the allowed set via the registry + permission gate, emits `tool.discovered` decision data, records `tool_selected`, and requests a tool directly from the plan node (transitioning into the waiting phase). Respond only streams model output when no tool was selected.
+4. `backend/app/executor.py` subscribes to `tool.requested`, validates descriptors, runs the permission gate, emits `tool.denied` (without contacting the server) when scopes are disallowed, and routes execution through the MCP client when permitted. Server-level failures emit `tool.server.error` before the usual `tool.failed`.
+5. `RunState` now stores `available_tools`, `requested_tool`, `tool_source`, `tool_permission_scope`, and `tool_denied_reason`. All MCP events are persisted so replay clearly shows which tools existed, which server provided them, and why a request did or did not run.
+6. The UI steps panel tracks “Tool discovered → Tool requested → Tool executed → Tool denied” progress from event data. The Response panel includes a tool provenance card that lists every discovered tool plus the currently requested tool with source/scope metadata, and displays the mandated denial message (“Tool X was not permitted in this context”) whenever the backend emits `tool.denied`.
 
 ### Manual curl flow
 
@@ -164,7 +174,7 @@ All events are appended to `backend/data/events/<run_id>.jsonl`, so you can repl
 - `backend/app/coordinator.py` listens to the event bus and advances the graph only after it observes the prior node’s completion event, ensuring the graph’s execution order is visible in the timeline.
 - The frontend displays the current status, per-node progress, output chunks, and decision log entirely from the streamed events. No hidden client-side state machines exist.
 
-## Validation checklist (Session 5)
+## Validation checklist (Session 6)
 
 1. **Runs outlive requests** – Start a run, close the tab, and tail `backend/data/events/<run_id>.jsonl`. The coordinator should keep appending events until `run.completed` or `run.failed` shows up.
 2. **UI reconstructs from events** – Trigger a run in the UI and refresh mid-flight. The page should reconnect (using the run id stored in `sessionStorage`), replay the timeline, and continue streaming live events without losing output or decisions.
@@ -176,5 +186,8 @@ All events are appended to `backend/data/events/<run_id>.jsonl`, so you can repl
 8. **Retrieval is visible** – Kick off a run and watch for `retrieval.started` / `retrieval.completed` in the SSE stream. The frontend steps panel should mark “Retrieval started” and “Retrieval completed” in order, and `RunState.retrieved_chunks` (via `/runs/<id>/state`) should list the chunk metadata stored for the run.
 9. **Grounded answers** – When retrieval returns chunks, the streamed output must cite chunk ids like `[internal_docs.md::000]`. Delete citations or alter chunk ids and rerun to confirm verification fails with `missing_citations` or `invalid_citation` and the run ends in a failure outcome. When retrieval returns zero chunks, the model should say it lacks sufficient evidence.
 10. **UI sources panel** – After a successful run, the Response panel should show a Sources section listing each cited chunk with document title, chunk id, and expandable preview. When no evidence was available (e.g., retrieval returned zero chunks) the panel should display “No sources were used for this answer.”
+11. **MCP discovery** – Start a run and watch the SSE stream for `tool.discovered` events before planning makes a decision. The steps panel should mark “Tool discovered” as soon as at least one tool is available, and `/runs/<id>/state` should list the same descriptors (with `source`, `permission_scope`, and `server_id`).
+12. **Permission enforcement** – Leave `GITHUB_TOKEN` unset and ask for GitHub data (e.g., “list files in repo octocat/Hello-World”). Planning should still discover the GitHub tools but the executor must emit `tool.denied` with reason `scope_not_allowed_environment`, the UI must display “Tool github.list_files was not permitted in this context,” and the run should finalize with a failure outcome without contacting GitHub.
+13. **External execution** – Provide a valid `GITHUB_TOKEN`, rerun the same request, and confirm `tool.executed` completes successfully, `tool.server.error` never fires, and the tool panel shows `source=external` with scope `github.read`. Disable the GitHub server in `backend/app/main.py` (comment out `GitHubMCPServer`) and verify no intelligence changes are required—the planner simply lists fewer discovered tools.
 
 See `docs/session_3_plan.md` and `docs/session_4_plan.md` for the implementation details and follow-up notes.

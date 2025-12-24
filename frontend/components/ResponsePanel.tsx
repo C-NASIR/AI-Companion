@@ -4,8 +4,10 @@ import { useMemo } from "react";
 
 import { DECISION_LABELS } from "../lib/chatUiConstants";
 import type {
+  AvailableToolEntry,
   DecisionEntry,
   RetrievedChunkEntry,
+  ToolContextState,
 } from "../lib/chatTypes";
 
 interface ResponsePanelProps {
@@ -15,6 +17,8 @@ interface ResponsePanelProps {
   retrievedChunks: RetrievedChunkEntry[];
   retrievalAttempted: boolean;
   runComplete: boolean;
+  availableTools: AvailableToolEntry[];
+  toolContext: ToolContextState;
 }
 
 const CITATION_PATTERN = /\[([\w\-\.:]+)\]/g;
@@ -26,6 +30,8 @@ export default function ResponsePanel({
   retrievedChunks,
   retrievalAttempted,
   runComplete,
+  availableTools,
+  toolContext,
 }: ResponsePanelProps) {
   const displayOutput = runComplete && finalText ? finalText : output;
 
@@ -120,6 +126,71 @@ export default function ResponsePanel({
           )}
         </div>
       ) : null}
+      <div className="mt-3 rounded-xl border border-slate-800/60 bg-slate-950/40 p-3">
+        <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
+          Tools
+        </p>
+        {availableTools.length === 0 ? (
+          <p className="mt-2 text-xs text-slate-500">
+            Tools will appear once the planner discovers them.
+          </p>
+        ) : (
+          <ul className="mt-2 space-y-2 text-sm text-slate-200">
+            {availableTools.map((tool) => (
+              <li
+                key={tool.name}
+                className="rounded-lg border border-slate-800/50 bg-slate-900/60 p-2"
+              >
+                <p className="text-sm font-semibold text-slate-100">
+                  {tool.name}
+                </p>
+                <p className="text-xs uppercase tracking-[0.3em] text-slate-400">
+                  {tool.source}
+                </p>
+                <p className="text-xs text-slate-500">
+                  Scope:{" "}
+                  <span className="font-mono text-slate-300">
+                    {tool.permission_scope}
+                  </span>
+                </p>
+                {tool.server_id ? (
+                  <p className="text-xs text-slate-600">
+                    Server:{" "}
+                    <span className="font-mono">{tool.server_id}</span>
+                  </p>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        )}
+        <div className="mt-3 rounded-lg border border-slate-800/60 bg-slate-950/50 p-2">
+          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">
+            Active tool usage
+          </p>
+          {toolContext.requestedTool ? (
+            <div className="mt-2 text-sm text-slate-100">
+              <p className="font-semibold">{toolContext.requestedTool}</p>
+              <p className="text-xs text-slate-500">
+                {toolContext.toolSource ?? "unknown source"} •{" "}
+                {toolContext.toolPermissionScope ?? "unknown scope"}
+              </p>
+              <p className="text-xs text-slate-500">
+                Status: {toolContext.lastToolStatus ?? "requested"}
+              </p>
+            </div>
+          ) : (
+            <p className="mt-2 text-xs text-slate-500">
+              No tool was requested for this run.
+            </p>
+          )}
+          {toolContext.toolDeniedReason && toolContext.requestedTool ? (
+            <p className="mt-3 rounded-lg border border-rose-900/50 bg-rose-950/30 p-2 text-xs text-rose-100">
+              Tool {toolContext.requestedTool} was not permitted in this
+              context.
+            </p>
+          ) : null}
+        </div>
+      </div>
       <div className="mt-3 rounded-xl border border-slate-800/60 bg-slate-950/40 p-3">
         <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
           Decisions

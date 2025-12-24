@@ -21,8 +21,10 @@ import {
   type StepStateMap,
 } from "../lib/chatUiConstants";
 import type {
+  AvailableToolEntry,
   DecisionEntry,
   RetrievedChunkEntry,
+  ToolContextState,
 } from "../lib/chatTypes";
 
 export interface SubmissionMeta {
@@ -74,6 +76,14 @@ const readStoredRun = (): StoredRun | null => {
   return null;
 };
 
+const INITIAL_TOOL_CONTEXT: ToolContextState = {
+  requestedTool: null,
+  toolSource: null,
+  toolPermissionScope: null,
+  toolDeniedReason: null,
+  lastToolStatus: null,
+};
+
 export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
   const [statusValue, setStatusValue] = useState<StatusValue | null>(null);
   const [steps, setSteps] = useState<StepStateMap>(() => createInitialSteps());
@@ -89,6 +99,12 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
     []
   );
   const [retrievalAttempted, setRetrievalAttempted] = useState(false);
+  const [availableTools, setAvailableTools] = useState<AvailableToolEntry[]>(
+    []
+  );
+  const [toolContext, setToolContext] = useState<ToolContextState>(
+    INITIAL_TOOL_CONTEXT
+  );
 
   const [formError, setFormError] = useState<string | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
@@ -119,7 +135,7 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
       STEP_LABELS.map((label) => {
         const state = steps[label] ?? "pending";
         const displayLabel =
-          label === TOOL_STEP_LABELS.completed && state === "failed"
+          label === TOOL_STEP_LABELS.executed && state === "failed"
             ? "Tool failed"
             : label;
         return { label: displayLabel, state };
@@ -159,6 +175,8 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
     setRunError(null);
     setRetrievedChunks([]);
     setRetrievalAttempted(false);
+    setAvailableTools([]);
+    setToolContext(INITIAL_TOOL_CONTEXT);
     lastSeqRef.current = 0;
   }, []);
 
@@ -280,21 +298,77 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
         break;
       }
 
-      case "tool.requested": {
+      case "tool.discovered": {
+        const toolName =
+          typeof event.data?.tool_name === "string" ? event.data.tool_name : null;
+        const source =
+          typeof event.data?.source === "string" ? event.data.source : null;
+        const scope =
+          typeof event.data?.permission_scope === "string"
+            ? event.data.permission_scope
+            : null;
+        if (toolName && source && scope) {
+          setAvailableTools((prev) => {
+            const exists = prev.some((entry) => entry.name === toolName);
+            if (exists) {
+              return prev;
+            }
+            return [
+              ...prev,
+              {
+                name: toolName,
+                source,
+                permission_scope: scope,
+              },
+            ];
+          });
+        }
         setSteps((prev) => ({
           ...prev,
-          [TOOL_STEP_LABELS.requested]: "completed",
-          [TOOL_STEP_LABELS.executing]: "started",
-          [TOOL_STEP_LABELS.completed]: "pending",
+          [TOOL_STEP_LABELS.discovered]: "completed",
         }));
+        break;
+      }
+
+      case "tool.requested": {
+        const toolName =
+          typeof event.data?.tool_name === "string" ? event.data.tool_name : null;
+        const source =
+          typeof event.data?.source === "string" ? event.data.source : null;
+        const scope =
+          typeof event.data?.permission_scope === "string"
+            ? event.data.permission_scope
+            : null;
+        setSteps((prev) => ({
+          ...prev,
+          [TOOL_STEP_LABELS.discovered]:
+            prev[TOOL_STEP_LABELS.discovered] ?? "completed",
+          [TOOL_STEP_LABELS.requested]: "completed",
+          [TOOL_STEP_LABELS.executed]: "started",
+          [TOOL_STEP_LABELS.denied]: "pending",
+        }));
+        if (toolName) {
+          setToolContext({
+            requestedTool: toolName,
+            toolSource: source ?? null,
+            toolPermissionScope: scope ?? null,
+            toolDeniedReason: null,
+            lastToolStatus: "requested",
+          });
+        }
         break;
       }
 
       case "tool.completed": {
         setSteps((prev) => ({
           ...prev,
-          [TOOL_STEP_LABELS.executing]: "completed",
-          [TOOL_STEP_LABELS.completed]: "completed",
+          [TOOL_STEP_LABELS.executed]: "completed",
+          [TOOL_STEP_LABELS.denied]: "pending",
+        }));
+        setToolContext((prev) => ({
+          ...prev,
+          toolDeniedReason: null,
+          lastToolStatus: "completed",
         }));
         break;
       }
@@ -302,8 +376,29 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
       case "tool.failed": {
         setSteps((prev) => ({
           ...prev,
-          [TOOL_STEP_LABELS.executing]: "completed",
-          [TOOL_STEP_LABELS.completed]: "failed",
+          [TOOL_STEP_LABELS.executed]: "failed",
+          [TOOL_STEP_LABELS.denied]: "pending",
+        }));
+        setToolContext((prev) => ({
+          ...prev,
+          toolDeniedReason: null,
+          lastToolStatus: "failed",
+        }));
+        break;
+      }
+
+      case "tool.denied": {
+        const reason =
+          typeof event.data?.reason === "string" ? event.data.reason : "denied";
+        setSteps((prev) => ({
+          ...prev,
+          [TOOL_STEP_LABELS.executed]: "pending",
+          [TOOL_STEP_LABELS.denied]: "failed",
+        }));
+        setToolContext((prev) => ({
+          ...prev,
+          toolDeniedReason: reason,
+          lastToolStatus: "denied",
         }));
         break;
       }
@@ -347,8 +442,25 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
         const chunks = Array.isArray(payload.retrieved_chunks)
           ? (payload.retrieved_chunks as RetrievedChunkEntry[])
           : [];
+        const tools = Array.isArray(payload.available_tools)
+          ? (payload.available_tools as AvailableToolEntry[])
+          : [];
+        const resolvedToolContext: ToolContextState = {
+          requestedTool: payload.requested_tool ?? null,
+          toolSource: payload.tool_source ?? null,
+          toolPermissionScope: payload.tool_permission_scope ?? null,
+          toolDeniedReason: payload.tool_denied_reason ?? null,
+          lastToolStatus: payload.last_tool_status ?? null,
+        };
         if (!cancelled) {
           setRetrievedChunks(chunks);
+          if (tools.length > 0) {
+            setAvailableTools(tools);
+          }
+          setToolContext((prev) => ({
+            ...prev,
+            ...resolvedToolContext,
+          }));
         }
       })
       .catch(() => {
@@ -430,5 +542,7 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
     statusDisplay,
     retrievedChunks,
     retrievalAttempted,
+    availableTools,
+    toolContext,
   };
 };

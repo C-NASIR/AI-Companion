@@ -38,6 +38,8 @@ class ToolRequestedPayload(BaseModel):
 
     tool_name: str
     arguments: dict[str, Any]
+    source: str | None = None
+    permission_scope: str | None = None
 
 
 class ToolCompletedPayload(BaseModel):
@@ -69,6 +71,35 @@ class RetrievalCompletedPayload(BaseModel):
     chunk_ids: list[str]
 
 
+class ToolDiscoveredPayload(BaseModel):
+    """Data stored when tools become available for a run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool_name: str
+    source: str
+    permission_scope: str
+
+
+class ToolDeniedPayload(BaseModel):
+    """Data stored for denied tool execution."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool_name: str
+    permission_scope: str
+    reason: str
+
+
+class ToolServerErrorPayload(BaseModel):
+    """Data stored when an MCP server raises an error."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    server_id: str
+    error: dict[str, Any]
+
+
 def new_event(event_type: str, run_id: str, data: Mapping[str, Any]) -> Event:
     """Create a fresh event with metadata initialized."""
     return Event(
@@ -82,11 +113,19 @@ def new_event(event_type: str, run_id: str, data: Mapping[str, Any]) -> Event:
 
 
 def tool_requested_event(
-    run_id: str, *, tool_name: str, arguments: Mapping[str, Any]
+    run_id: str,
+    *,
+    tool_name: str,
+    arguments: Mapping[str, Any],
+    source: str | None = None,
+    permission_scope: str | None = None,
 ) -> Event:
     """Helper to build validated tool.requested events."""
     payload = ToolRequestedPayload(
-        tool_name=tool_name, arguments=dict(arguments)
+        tool_name=tool_name,
+        arguments=dict(arguments),
+        source=source,
+        permission_scope=permission_scope,
     ).model_dump()
     return new_event("tool.requested", run_id, payload)
 
@@ -121,6 +160,42 @@ def tool_failed_event(
         duration_ms=max(int(duration_ms), 0),
     ).model_dump()
     return new_event("tool.failed", run_id, payload)
+
+
+def tool_discovered_event(
+    run_id: str, *, tool_name: str, source: str, permission_scope: str
+) -> Event:
+    payload = ToolDiscoveredPayload(
+        tool_name=tool_name,
+        source=source,
+        permission_scope=permission_scope,
+    ).model_dump()
+    return new_event("tool.discovered", run_id, payload)
+
+
+def tool_denied_event(
+    run_id: str,
+    *,
+    tool_name: str,
+    permission_scope: str,
+    reason: str,
+) -> Event:
+    payload = ToolDeniedPayload(
+        tool_name=tool_name,
+        permission_scope=permission_scope,
+        reason=reason,
+    ).model_dump()
+    return new_event("tool.denied", run_id, payload)
+
+
+def tool_server_error_event(
+    run_id: str, *, server_id: str, error: Mapping[str, Any]
+) -> Event:
+    payload = ToolServerErrorPayload(
+        server_id=server_id,
+        error=dict(error),
+    ).model_dump()
+    return new_event("tool.server.error", run_id, payload)
 
 
 def retrieval_started_event(run_id: str, query: str | None = None) -> Event:

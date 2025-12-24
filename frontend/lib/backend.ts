@@ -12,9 +12,12 @@ export type RunEventType =
   | "output.chunk"
   | "status.changed"
   | "error.raised"
+  | "tool.discovered"
   | "tool.requested"
   | "tool.completed"
   | "tool.failed"
+  | "tool.denied"
+  | "tool.server.error"
   | "retrieval.started"
   | "retrieval.completed";
 
@@ -152,6 +155,19 @@ export interface RunStatePayload {
   run_id: string;
   output_text: string;
   retrieved_chunks?: RetrievedChunkState[];
+  available_tools?: AvailableToolEntry[];
+  requested_tool?: string | null;
+  tool_source?: string | null;
+  tool_permission_scope?: string | null;
+  tool_denied_reason?: string | null;
+  last_tool_status?: string | null;
+}
+
+export interface AvailableToolEntry {
+  name: string;
+  source: string;
+  permission_scope: string;
+  server_id?: string | null;
 }
 
 export async function fetchRunState(

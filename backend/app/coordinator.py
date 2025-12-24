@@ -8,6 +8,8 @@ from typing import Callable, Mapping
 
 from .events import Event, EventBus, new_event
 from .intelligence import GRAPH, NODE_MAP, NodeContext
+from .mcp.registry import MCPRegistry
+from .permissions import PermissionGate
 from .retrieval import RetrievalStore
 from .state import RunPhase, RunState
 from .state_store import StateStore
@@ -29,10 +31,14 @@ class RunCoordinator:
         bus: EventBus,
         state_store: StateStore,
         retrieval_store: RetrievalStore,
+        tool_registry: MCPRegistry,
+        permission_gate: PermissionGate,
     ):
         self.bus = bus
         self.state_store = state_store
         self.retrieval_store = retrieval_store
+        self.tool_registry = tool_registry
+        self.permission_gate = permission_gate
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
     async def start_run(self, state: RunState) -> None:
@@ -49,7 +55,12 @@ class RunCoordinator:
             await queue.put(event)
 
         unsubscribe = self.bus.subscribe(run_id, _subscriber)
-        ctx = NodeContext(self.bus, self.state_store, self.retrieval_store)
+        ctx = NodeContext(
+            self.bus,
+            self.state_store,
+            self.retrieval_store,
+            allowed_tools_provider=self._build_allowed_tools_provider(),
+        )
         task = asyncio.create_task(
             self._run_loop(state, queue, unsubscribe, ctx), name=f"run-{run_id}"
         )
@@ -68,6 +79,19 @@ class RunCoordinator:
         )
         logger.info("run scheduled", extra={"run_id": run_id})
 
+    def _build_allowed_tools_provider(self) -> Callable[[RunState], list]:
+        def _provider(current_state: RunState) -> list:
+            context = self.permission_gate.build_context(
+                user_role="human",
+                run_type=current_state.mode.value,
+            )
+            return self.permission_gate.filter_allowed(
+                self.tool_registry.list_tools(),
+                context,
+            )
+
+        return _provider
+
     async def _run_loop(
         self,
         state: RunState,
@@ -84,7 +108,7 @@ class RunCoordinator:
                         "run finished via event type=%s", event.type, extra={"run_id": run_id}
                     )
                     break
-                if event.type in {"tool.completed", "tool.failed"}:
+                if event.type in {"tool.completed", "tool.failed", "tool.denied"}:
                     await self._handle_tool_event(state, ctx, event)
                 next_node = self._next_node_for_event(state, event)
                 if not next_node:
@@ -127,6 +151,7 @@ class RunCoordinator:
         if not isinstance(tool_name, str):
             tool_name = "unknown"
         duration_ms = int(event.data.get("duration_ms") or 0)
+        next_phase = RunPhase.RESPOND
         if event.type == "tool.completed":
             output = event.data.get("output")
             if not isinstance(output, Mapping):
@@ -146,7 +171,7 @@ class RunCoordinator:
                 duration_ms,
                 extra={"run_id": run_id},
             )
-        else:
+        elif event.type == "tool.failed":
             error = event.data.get("error")
             if not isinstance(error, Mapping):
                 error = {"error": "unknown"}
@@ -169,7 +194,26 @@ class RunCoordinator:
                 reason_str,
                 extra={"run_id": run_id},
             )
-        state.transition_phase(RunPhase.RESPOND)
+            next_phase = RunPhase.FINALIZE
+        else:  # tool.denied
+            reason = event.data.get("reason")
+            if not isinstance(reason, str) or not reason:
+                reason = "permission_denied"
+            state.set_tool_denied(reason)
+            state.record_decision("tool_result", "denied", notes=reason)
+            await ctx.emit_decision(state, "tool_result", "denied", reason)
+            state.record_tool_result(
+                name=tool_name,
+                status="failed",
+                payload={"error": reason},
+                duration_ms=0,
+            )
+            state.set_verification(passed=False, reason="tool_denied")
+            next_phase = RunPhase.FINALIZE
+            logger.warning(
+                "tool denied tool=%s reason=%s", tool_name, reason, extra={"run_id": run_id}
+            )
+        state.transition_phase(next_phase)
         ctx.save_state(state)
 
     @staticmethod
@@ -178,7 +222,7 @@ class RunCoordinator:
             return NODE_SEQUENCE[0]
         if event.type == "tool.completed":
             return "verify"
-        if event.type == "tool.failed":
+        if event.type in {"tool.failed", "tool.denied"}:
             return "finalize"
         if event.type == "node.completed":
             if state.phase == RunPhase.WAITING_FOR_TOOL:

@@ -13,6 +13,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from .coordinator import RunCoordinator
 from .events import EventBus, EventStore, sse_event_stream
 from .ingestion import EmbeddingGenerator
+from .mcp.client import MCPClient
+from .mcp.registry import MCPRegistry
+from .permissions import PermissionGate
 from .retrieval import InMemoryRetrievalStore, configure_retrieval_store
 from .schemas import ChatRequest, FeedbackRequest, iso_timestamp
 from .state import RunState
@@ -33,7 +36,12 @@ STATE_STORE = StateStore(STATE_DIR)
 EMBEDDING_GENERATOR = EmbeddingGenerator()
 RETRIEVAL_STORE = InMemoryRetrievalStore(EMBEDDING_GENERATOR.embed)
 configure_retrieval_store(RETRIEVAL_STORE)
-RUN_COORDINATOR = RunCoordinator(EVENT_BUS, STATE_STORE, RETRIEVAL_STORE)
+MCP_REGISTRY = MCPRegistry()
+PERMISSION_GATE = PermissionGate()
+MCP_CLIENT = MCPClient(MCP_REGISTRY)
+RUN_COORDINATOR = RunCoordinator(
+    EVENT_BUS, STATE_STORE, RETRIEVAL_STORE, MCP_REGISTRY, PERMISSION_GATE
+)
 
 
 def _log(message: str, run_id: str, *args: object) -> None:

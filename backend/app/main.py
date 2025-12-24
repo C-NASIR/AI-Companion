@@ -1,4 +1,4 @@
-"""FastAPI application bootstrap for Session 5 backend."""
+"""FastAPI application bootstrap for Session 6 backend."""
 
 from __future__ import annotations
 
@@ -7,10 +7,21 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api import EMBEDDING_GENERATOR, EVENT_BUS, RETRIEVAL_STORE, router
+from .api import (
+    EMBEDDING_GENERATOR,
+    EVENT_BUS,
+    MCP_CLIENT,
+    MCP_REGISTRY,
+    PERMISSION_GATE,
+    RETRIEVAL_STORE,
+    STATE_STORE,
+    router,
+)
 from .executor import ToolExecutor
 from .ingestion import run_ingestion
-from .tools import get_tool_registry
+from .events import tool_discovered_event
+from .mcp.servers.calculator_server import CalculatorMCPServer
+from .mcp.servers.github_server import GitHubMCPServer
 
 
 class _RunIdFilter(logging.Filter):
@@ -35,7 +46,34 @@ def _configure_logging() -> None:
 
 _configure_logging()
 
-TOOL_EXECUTOR = ToolExecutor(EVENT_BUS, get_tool_registry())
+TOOL_EXECUTOR = ToolExecutor(
+    EVENT_BUS,
+    MCP_REGISTRY,
+    MCP_CLIENT,
+    PERMISSION_GATE,
+    STATE_STORE,
+)
+_MCP_INITIALIZED = False
+
+
+async def _initialize_mcp() -> None:
+    global _MCP_INITIALIZED
+    if _MCP_INITIALIZED:
+        return
+    servers = [CalculatorMCPServer(), GitHubMCPServer()]
+    for server in servers:
+        MCP_CLIENT.register_server(server)
+    descriptors = await MCP_CLIENT.discover_tools()
+    for descriptor in descriptors:
+        await EVENT_BUS.publish(
+            tool_discovered_event(
+                "system",
+                tool_name=descriptor.name,
+                source=descriptor.source,
+                permission_scope=descriptor.permission_scope,
+            )
+        )
+    _MCP_INITIALIZED = True
 
 
 def create_app() -> FastAPI:
@@ -52,6 +90,7 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def _startup() -> None:
+        await _initialize_mcp()
         await TOOL_EXECUTOR.start()
         stats = await run_ingestion(
             RETRIEVAL_STORE,
