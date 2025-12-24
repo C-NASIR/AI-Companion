@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  fetchRunSpans,
   fetchRunState,
   fetchWorkflowState,
   startRunRequest,
@@ -11,6 +12,8 @@ import {
   type RunEvent,
   type RunEventSubscription,
   type WorkflowStatusValue,
+  type SpanAlert,
+  type SpanRecord,
 } from "../lib/backend";
 import {
   NODE_TO_STEP_LABEL,
@@ -137,6 +140,99 @@ const toNumber = (value: unknown): number | null => {
   return null;
 };
 
+const parseTimestampMs = (value?: string | null): number => {
+  if (!value) return 0;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? 0 : parsed;
+};
+
+const findLatestSpan = (
+  spans: SpanRecord[],
+  predicate: (span: SpanRecord) => boolean
+): SpanRecord | null => {
+  let latest: SpanRecord | null = null;
+  let latestTs = -Infinity;
+  for (const span of spans) {
+    if (!predicate(span)) {
+      continue;
+    }
+    const ts = parseTimestampMs(span.start_time);
+    if (ts > latestTs) {
+      latest = span;
+      latestTs = ts;
+    }
+  }
+  return latest;
+};
+
+const buildSpanAlerts = (spans: SpanRecord[]): SpanAlert[] => {
+  const alerts: SpanAlert[] = [];
+  const approvalSpan = findLatestSpan(
+    spans,
+    (span) =>
+      span.status === "waiting" &&
+      (span.attributes?.["error_type"] === "approval_wait" ||
+        span.name.includes("approve"))
+  );
+  if (approvalSpan) {
+    const reason =
+      (approvalSpan.attributes?.["reason"] as string) ??
+      (approvalSpan.error?.reason as string) ??
+      "Waiting for approval";
+    alerts.push({
+      type: "approval",
+      title: "Waiting for approval",
+      message: reason,
+    });
+  }
+
+  const retrySpan = findLatestSpan(
+    spans,
+    (span) => span.status === "retried"
+  );
+  if (retrySpan) {
+    alerts.push({
+      type: "retry",
+      title: "Retry scheduled",
+      message: `Retrying ${retrySpan.name}`,
+    });
+  }
+
+  const toolSpan = findLatestSpan(
+    spans,
+    (span) =>
+      span.kind === "tool" &&
+      (!span.end_time || span.status === "running" || span.status === "waiting")
+  );
+  if (toolSpan) {
+    const toolName =
+      (toolSpan.attributes?.["tool_name"] as string) ??
+      toolSpan.name.replace("tool.", "");
+    alerts.push({
+      type: "tool",
+      title: "Tool running",
+      message: `${toolName} is still executing.`,
+    });
+  }
+
+  const retrievalSpan = findLatestSpan(
+    spans,
+    (span) =>
+      span.kind === "intelligence" &&
+      span.name.includes("retrieve") &&
+      span.status === "waiting"
+  );
+  if (retrievalSpan) {
+    alerts.push({
+      type: "retrieval",
+      title: "Retrieval pending",
+      message: "Waiting for retrieval results before responding.",
+    });
+  }
+
+  return alerts;
+};
+
 export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
   const [statusValue, setStatusValue] = useState<StatusValue | null>(null);
   const [steps, setSteps] = useState<StepStateMap>(() => createInitialSteps());
@@ -152,6 +248,7 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
     []
   );
   const [retrievalAttempted, setRetrievalAttempted] = useState(false);
+  const [retrievalPending, setRetrievalPending] = useState(false);
   const [availableTools, setAvailableTools] = useState<AvailableToolEntry[]>(
     []
   );
@@ -177,6 +274,7 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
   const [approvalDecision, setApprovalDecision] = useState<string | null>(null);
   const [isSubmittingApproval, setIsSubmittingApproval] = useState(false);
   const [approvalError, setApprovalError] = useState<string | null>(null);
+  const [spanAlerts, setSpanAlerts] = useState<SpanAlert[]>([]);
 
   const [formError, setFormError] = useState<string | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
@@ -190,6 +288,54 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
   const outputRef = useRef("");
 
   const statusDisplay: StatusDisplay = useMemo(() => {
+    if (spanAlerts.length > 0) {
+      return {
+        label: spanAlerts[0]?.title,
+        hint: spanAlerts[0]?.message,
+      };
+    }
+    if (approvalPending) {
+      return {
+        label: "Waiting for approval",
+        hint:
+          approvalPending.reason ??
+          "Execution is paused until you approve or reject.",
+      };
+    }
+    if (workflowRetryInfo) {
+      return {
+        label: `Retrying ${workflowRetryInfo.step}`,
+        hint: `Attempt ${workflowRetryInfo.attempt} resumes in ${workflowRetryInfo.backoffSeconds}s.`,
+      };
+    }
+    const waitingEvents = workflowWaitingInfo?.events ?? [];
+    const waitingReason = workflowWaitingInfo?.reason;
+    const waitingForTool = waitingEvents.some((event) =>
+      event.startsWith("tool.")
+    );
+    const waitingForRetrieval = waitingEvents.some((event) =>
+      event.startsWith("retrieval.")
+    );
+    if (waitingForTool) {
+      const toolName =
+        toolContext.requestedTool ||
+        toolContext.toolSource ||
+        "the requested tool";
+      return {
+        label: "Waiting on tool",
+        hint:
+          waitingReason ??
+          `Workflow is blocked until ${toolName} produces a result.`,
+      };
+    }
+    if (waitingForRetrieval || retrievalPending) {
+      return {
+        label: "Retrieving knowledge",
+        hint:
+          waitingReason ??
+          "Retrieval is still running; results will stream in automatically.",
+      };
+    }
     if (!statusValue) {
       return {
         label: "Idle",
@@ -200,7 +346,16 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
       label: STATUS_LABELS[statusValue],
       hint: STATUS_HINTS[statusValue],
     };
-  }, [statusValue]);
+  }, [
+    approvalPending,
+    retrievalPending,
+    spanAlerts,
+    statusValue,
+    toolContext.requestedTool,
+    toolContext.toolSource,
+    workflowRetryInfo,
+    workflowWaitingInfo,
+  ]);
 
   const orderedSteps = useMemo(
     () =>
@@ -247,6 +402,7 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
     setRunError(null);
     setRetrievedChunks([]);
     setRetrievalAttempted(false);
+    setRetrievalPending(false);
     setAvailableTools([]);
     setToolContext(INITIAL_TOOL_CONTEXT);
     setWorkflowStatus(null);
@@ -257,8 +413,39 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
     setApprovalPending(null);
     setApprovalDecision(null);
     setApprovalError(null);
+    setSpanAlerts([]);
     lastSeqRef.current = 0;
   }, []);
+
+  useEffect(() => {
+    if (!currentRunId) {
+      setSpanAlerts([]);
+      return;
+    }
+    let cancelled = false;
+    const loadSpans = async () => {
+      try {
+        const spans = (await fetchRunSpans(currentRunId)) ?? [];
+        if (cancelled) return;
+        setSpanAlerts(buildSpanAlerts(spans));
+      } catch {
+        if (!cancelled) {
+          setSpanAlerts([]);
+        }
+      }
+    };
+    loadSpans();
+    if (runComplete) {
+      return () => {
+        cancelled = true;
+      };
+    }
+    const interval = setInterval(loadSpans, 4000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [currentRunId, runComplete]);
 
   const handleRunEvent = useCallback((event: RunEvent) => {
     if (event.seq <= lastSeqRef.current) {
@@ -278,6 +465,7 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
       case "run.started": {
         setSteps(createInitialSteps());
         setRetrievalAttempted(false);
+        setRetrievalPending(false);
         break;
       }
 
@@ -292,6 +480,7 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
         setWorkflowWaitingInfo(null);
         setApprovalPending(null);
         setApprovalDecision(null);
+        setRetrievalPending(false);
         if (isWorkflowStatusValue(event.data?.status)) {
           setWorkflowStatus(event.data.status);
         }
@@ -308,6 +497,9 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
             ...prev,
             [step]: attempt,
           }));
+          if (step !== "retrieve") {
+            setRetrievalPending(false);
+          }
         }
         setWorkflowRetryInfo(null);
         setWorkflowWaitingInfo(null);
@@ -318,6 +510,11 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
       }
 
       case "workflow.step.completed": {
+        const step =
+          typeof event.data?.step === "string" ? event.data.step : null;
+        if (step === "retrieve") {
+          setRetrievalPending(false);
+        }
         if (isWorkflowStatusValue(event.data?.status)) {
           setWorkflowStatus(event.data.status);
         }
@@ -343,6 +540,9 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
           }));
         }
         setWorkflowWaitingInfo(null);
+        if (step === "retrieve") {
+          setRetrievalPending(false);
+        }
         if (isWorkflowStatusValue(event.data?.status)) {
           setWorkflowStatus(event.data.status);
         }
@@ -396,6 +596,7 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
 
       case "workflow.completed":
       case "workflow.failed": {
+        setRetrievalPending(false);
         if (isWorkflowStatusValue(event.data?.status)) {
           setWorkflowStatus(event.data.status);
         } else if (event.type === "workflow.completed") {
@@ -466,6 +667,7 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
 
       case "retrieval.started": {
         setRetrievalAttempted(true);
+        setRetrievalPending(true);
         setSteps((prev) => ({
           ...prev,
           "Retrieval started": "completed",
@@ -479,6 +681,7 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
           ...prev,
           "Retrieval completed": "completed",
         }));
+        setRetrievalPending(false);
         break;
       }
 
@@ -491,6 +694,7 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
             : outputRef.current) ?? "";
         setFinalText(final);
         setRunComplete(true);
+        setRetrievalPending(false);
         const reason =
           typeof event.data?.reason === "string" ? event.data.reason : null;
         if (event.type === "run.completed") {
@@ -857,6 +1061,7 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
     runOutcome,
     runOutcomeReason,
     statusDisplay,
+    spanAlerts,
     retrievedChunks,
     retrievalAttempted,
     availableTools,

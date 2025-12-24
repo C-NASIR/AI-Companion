@@ -52,6 +52,10 @@ class WorkflowState(BaseModel):
     human_decision: str | None = None
     last_error: dict[str, Any] | None = None
     pending_events: list[str] = Field(default_factory=list)
+    root_span_id: str | None = None
+    wait_span_id: str | None = None
+    wait_kind: str | None = None
+    wait_reason: str | None = None
     created_at: str = Field(default_factory=iso_timestamp)
     updated_at: str = Field(default_factory=iso_timestamp)
 

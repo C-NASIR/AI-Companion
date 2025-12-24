@@ -46,6 +46,7 @@ export default function HomePage() {
           runOutcome={chatRun.runOutcome}
           runOutcomeReason={chatRun.runOutcomeReason}
           workflowSummary={chatRun.workflowSummary}
+          spanAlerts={chatRun.spanAlerts}
         />
         <ApprovalGate
           waiting={chatRun.approvalState.waiting}

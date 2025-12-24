@@ -10,7 +10,7 @@ from ..events import (
     tool_discovered_event,
     tool_requested_event,
 )
-from ..model import stream_chat
+from ..model import OPENAI_MODEL, stream_chat
 from ..schemas import ChatMode
 from ..state import PlanType, RunPhase, RunState
 from ..intelligence.intents import match_tool_intent
@@ -20,7 +20,7 @@ from ..intelligence.tool_feedback import (
 )
 from ..intelligence.utils import log_run
 from .context import ActivityContext
-from .engine import ExternalEventRequired, HumanApprovalRequired
+from .exceptions import ExternalEventRequired, HumanApprovalRequired
 from .models import ActivityFunc, WorkflowState, WorkflowStatus
 
 
@@ -31,16 +31,46 @@ def _chunk_text(text: str, size: int = 64) -> list[str]:
 async def _gather_response_text(
     state: RunState,
     retrieved_chunks: Sequence[Mapping[str, Any]],
+    ctx: ActivityContext | None = None,
 ) -> str:
     chunks: list[str] = []
-    async for chunk in stream_chat(
-        state.message,
-        state.context,
-        state.mode,
-        state.run_id,
-        retrieved_chunks,
-    ):
-        chunks.append(chunk)
+    tracer = ctx.tracer if ctx else None
+    run_id = state.run_id
+    span_id: str | None = None
+    status = "success"
+    error_payload: dict[str, Any] | None = None
+    if tracer:
+        parent_span_id = ctx.current_node_span(run_id) if ctx else None
+        span_id = tracer.start_span(
+            run_id,
+            "model.openai_chat",
+            "model",
+            parent_span_id=parent_span_id,
+            attributes={"model": OPENAI_MODEL, "mode": state.mode.value},
+        )
+    try:
+        async for chunk in stream_chat(
+            state.message,
+            state.context,
+            state.mode,
+            run_id,
+            retrieved_chunks,
+        ):
+            chunks.append(chunk)
+    except Exception as exc:
+        status = "failed"
+        error_payload = {
+            "error_type": "network_failure",
+            "error": exc.__class__.__name__,
+            "message": str(exc),
+        }
+        raise
+    finally:
+        if tracer and span_id:
+            tracer.add_span_attribute(run_id, span_id, "chunk_count", len(chunks))
+            if error_payload:
+                tracer.add_span_attribute(run_id, span_id, "error_type", error_payload["error_type"])
+            tracer.end_span(run_id, span_id, status, error_payload)
     return "".join(chunks)
 
 
@@ -119,6 +149,7 @@ def create_plan_activity(ctx: ActivityContext) -> ActivityFunc:
                             arguments=arguments,
                             source=descriptor.source,
                             permission_scope=descriptor.permission_scope,
+                            parent_span_id=ctx.current_node_span(state.run_id),
                         )
                     )
                     log_run(
@@ -192,7 +223,7 @@ def create_respond_activity(ctx: ActivityContext) -> ActivityFunc:
                 strategy = "tool_summary"
                 notes = state.requested_tool or "tool_result"
             elif plan == PlanType.DIRECT_ANSWER:
-                response_text = await _gather_response_text(state, state.retrieved_chunks)
+                response_text = await _gather_response_text(state, state.retrieved_chunks, ctx)
                 if response_text:
                     await ctx.emit_status(state, "responding")
                     state.append_output(response_text)

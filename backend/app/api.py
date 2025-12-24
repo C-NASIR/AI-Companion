@@ -22,6 +22,9 @@ from .retrieval import InMemoryRetrievalStore, configure_retrieval_store
 from .schemas import ChatRequest, FeedbackRequest, iso_timestamp
 from .state import RunState
 from .state_store import StateStore
+from .observability.store import TraceStore
+from .observability.tracer import Tracer
+from .observability.api import configure_trace_api, router as observability_router
 from .workflow import ActivityContext, WorkflowEngine, WorkflowStore, build_activity_map
 
 router = APIRouter()
@@ -31,6 +34,7 @@ FEEDBACK_FILE = DATA_DIR / "feedback.jsonl"
 EVENTS_DIR = DATA_DIR / "events"
 STATE_DIR = DATA_DIR / "state"
 WORKFLOW_DIR = DATA_DIR / "workflow"
+TRACE_DIR = DATA_DIR / "traces"
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -44,6 +48,10 @@ MCP_REGISTRY = MCPRegistry()
 PERMISSION_GATE = PermissionGate()
 MCP_CLIENT = MCPClient(MCP_REGISTRY)
 WORKFLOW_STORE = WorkflowStore(WORKFLOW_DIR)
+TRACE_STORE = TraceStore(TRACE_DIR)
+TRACER = Tracer(TRACE_STORE)
+configure_trace_api(TRACE_STORE)
+router.include_router(observability_router)
 
 
 def _allowed_tools_provider(state: RunState):
@@ -62,6 +70,7 @@ ACTIVITY_CONTEXT = ActivityContext(
     STATE_STORE,
     RETRIEVAL_STORE,
     allowed_tools_provider=_allowed_tools_provider,
+    tracer=TRACER,
 )
 ACTIVITY_MAP = build_activity_map(ACTIVITY_CONTEXT)
 WORKFLOW_ENGINE = WorkflowEngine(
@@ -69,12 +78,15 @@ WORKFLOW_ENGINE = WorkflowEngine(
     WORKFLOW_STORE,
     STATE_STORE,
     activities=ACTIVITY_MAP,
+    activity_context=ACTIVITY_CONTEXT,
+    tracer=TRACER,
 )
 RUN_COORDINATOR = RunCoordinator(
     EVENT_BUS,
     STATE_STORE,
     WORKFLOW_ENGINE,
     ACTIVITY_CONTEXT,
+    TRACER,
 )
 
 

@@ -222,6 +222,33 @@ export interface AvailableToolEntry {
   server_id?: string | null;
 }
 
+export interface SpanRecord {
+  span_id: string;
+  trace_id: string;
+  parent_span_id?: string | null;
+  name: string;
+  kind: string;
+  start_time: string;
+  end_time?: string | null;
+  duration_ms?: number | null;
+  status: string;
+  attributes?: Record<string, unknown>;
+  error?: Record<string, unknown> | null;
+}
+
+export interface TraceRecord {
+  trace_id: string;
+  start_time: string;
+  end_time?: string | null;
+  status: string;
+  root_span_id?: string | null;
+}
+
+export interface TracePayload {
+  trace: TraceRecord;
+  spans: SpanRecord[];
+}
+
 export async function fetchRunState(
   runId: string
 ): Promise<RunStatePayload | null> {
@@ -272,3 +299,34 @@ export async function submitApprovalDecisionRequest(
     );
   }
 }
+
+async function fetchJsonOrNull<T>(url: string): Promise<T | null> {
+  const response = await fetch(url);
+  if (response.status === 404) {
+    return null;
+  }
+  if (!response.ok) {
+    throw new Error(`Request failed with status ${response.status}`);
+  }
+  return (await response.json()) as T;
+}
+
+export async function fetchRunTrace(
+  runId: string
+): Promise<TracePayload | null> {
+  const url = `${getBackendUrl()}/runs/${runId}/trace`;
+  return fetchJsonOrNull<TracePayload>(url);
+}
+
+export async function fetchRunSpans(
+  runId: string
+): Promise<SpanRecord[] | null> {
+  const url = `${getBackendUrl()}/runs/${runId}/spans`;
+  return fetchJsonOrNull<SpanRecord[]>(url);
+}
+
+export type SpanAlert =
+  | { type: "retry"; title: string; message: string }
+  | { type: "approval"; title: string; message: string }
+  | { type: "tool"; title: string; message: string }
+  | { type: "retrieval"; title: string; message: string };

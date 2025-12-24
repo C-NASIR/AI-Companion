@@ -40,6 +40,7 @@ class ToolRequestedPayload(BaseModel):
     arguments: dict[str, Any]
     source: str | None = None
     permission_scope: str | None = None
+    parent_span_id: str | None = None
 
 
 class ToolCompletedPayload(BaseModel):
@@ -119,6 +120,7 @@ def tool_requested_event(
     arguments: Mapping[str, Any],
     source: str | None = None,
     permission_scope: str | None = None,
+    parent_span_id: str | None = None,
 ) -> Event:
     """Helper to build validated tool.requested events."""
     payload = ToolRequestedPayload(
@@ -126,6 +128,7 @@ def tool_requested_event(
         arguments=dict(arguments),
         source=source,
         permission_scope=permission_scope,
+        parent_span_id=parent_span_id,
     ).model_dump()
     return new_event("tool.requested", run_id, payload)
 

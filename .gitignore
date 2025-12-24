@@ -29,6 +29,7 @@ backend/.pytest_cache/
 backend/data/events
 backend/data/state
 backend/data/workflow
+backend/data/traces
 *.log
 coverage/
 

@@ -1,6 +1,9 @@
 "use client";
 
+import Link from "next/link";
+
 import type { StatusDisplay, WorkflowSummary } from "../hooks/useChatRun";
+import type { SpanAlert } from "../lib/backend";
 import {
   NODE_TO_STEP_LABEL,
   WORKFLOW_STATUS_HINTS,
@@ -13,6 +16,7 @@ interface StatusCardProps {
   runOutcome: string | null;
   runOutcomeReason: string | null;
   workflowSummary: WorkflowSummary;
+  spanAlerts: SpanAlert[];
 }
 
 export default function StatusCard({
@@ -21,6 +25,7 @@ export default function StatusCard({
   runOutcome,
   runOutcomeReason,
   workflowSummary,
+  spanAlerts,
 }: StatusCardProps) {
   const workflowStatusLabel = workflowSummary.status
     ? WORKFLOW_STATUS_LABELS[workflowSummary.status]
@@ -38,6 +43,13 @@ export default function StatusCard({
       : workflowSummary.currentAttempt
       ? "Attempt 1"
       : null;
+  const waitingEvents = workflowSummary.waitingForEvents?.events ?? [];
+  const waitingForTool = waitingEvents.some((event) =>
+    event.startsWith("tool.")
+  );
+  const waitingForRetrieval = waitingEvents.some((event) =>
+    event.startsWith("retrieval.")
+  );
 
   return (
     <div className="rounded-2xl border border-slate-800/70 bg-slate-900/60 p-4 shadow-lg">
@@ -50,9 +62,19 @@ export default function StatusCard({
         </p>
         <p className="text-sm text-slate-400">{statusDisplay.hint}</p>
         {currentRunId ? (
-          <p className="text-xs font-mono text-slate-500">
-            run_id: <span className="text-slate-200">{currentRunId}</span>
-          </p>
+          <div className="text-xs text-slate-500">
+            <p className="font-mono">
+              run_id: <span className="text-slate-200">{currentRunId}</span>
+            </p>
+            <Link
+              href={`/runs/${currentRunId}/inspect`}
+              className="inline-block text-indigo-300 hover:text-indigo-200"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Open run inspector →
+            </Link>
+          </div>
         ) : (
           <p className="text-xs text-slate-500">
             Run id will appear once you start streaming.
@@ -66,6 +88,21 @@ export default function StatusCard({
           </p>
         ) : null}
       </div>
+      {spanAlerts.length ? (
+        <div className="mt-3 flex flex-col gap-2">
+          {spanAlerts.map((alert, index) => (
+            <div
+              key={`${alert.type}-${index}`}
+              className="rounded-xl border border-indigo-500/30 bg-indigo-500/10 p-3 text-sm text-indigo-100"
+            >
+              <p className="text-xs font-semibold uppercase tracking-[0.2em] text-indigo-300">
+                {alert.title}
+              </p>
+              <p>{alert.message}</p>
+            </div>
+          ))}
+        </div>
+      ) : null}
       {workflowStatusLabel ? (
         <div className="mt-4 rounded-xl border border-slate-800/60 bg-slate-950/40 p-3 text-sm text-slate-200">
           <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">
@@ -104,6 +141,18 @@ export default function StatusCard({
               {workflowSummary.waitingForEvents.reason
                 ? ` — ${workflowSummary.waitingForEvents.reason}`
                 : ""}
+            </p>
+          ) : null}
+          {waitingForTool ? (
+            <p className="mt-1 text-xs text-amber-300">
+              Blocked on tool execution. The run will resume once the tool
+              finishes.
+            </p>
+          ) : null}
+          {waitingForRetrieval ? (
+            <p className="mt-1 text-xs text-sky-300">
+              Retrieval still in progress. Knowledge chunks will appear when
+              ready.
             </p>
           ) : null}
         </div>

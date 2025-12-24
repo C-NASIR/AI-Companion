@@ -16,6 +16,7 @@ from .api import (
     RETRIEVAL_STORE,
     RUN_COORDINATOR,
     STATE_STORE,
+    TRACER,
     router,
 )
 from .executor import ToolExecutor
@@ -53,6 +54,7 @@ TOOL_EXECUTOR = ToolExecutor(
     MCP_CLIENT,
     PERMISSION_GATE,
     STATE_STORE,
+    TRACER,
 )
 _MCP_INITIALIZED = False
 

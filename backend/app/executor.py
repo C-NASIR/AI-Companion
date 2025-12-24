@@ -18,6 +18,7 @@ from .events import (
 from .mcp.client import MCPClient
 from .mcp.registry import MCPRegistry
 from .mcp.server import MCPServerError
+from .observability.tracer import Tracer
 from .permissions import PermissionGate
 from .state_store import StateStore
 
@@ -34,12 +35,14 @@ class ToolExecutor:
         client: MCPClient,
         permission_gate: PermissionGate,
         state_store: StateStore,
+        tracer: Tracer | None = None,
     ):
         self.bus = bus
         self.registry = registry
         self.client = client
         self.permission_gate = permission_gate
         self.state_store = state_store
+        self.tracer = tracer
         self._queue: asyncio.Queue[Event] | None = None
         self._task: asyncio.Task[None] | None = None
         self._unsubscribe: Callable[[], None] | None = None
@@ -83,6 +86,9 @@ class ToolExecutor:
         data = event.data or {}
         tool_name = data.get("tool_name")
         arguments = data.get("arguments")
+        parent_span_id = data.get("parent_span_id")
+        normalized_name = tool_name.strip() if isinstance(tool_name, str) else "unknown"
+        span_id = self._start_tool_span(run_id, normalized_name, parent_span_id)
 
         if not isinstance(tool_name, str) or not tool_name.strip():
             resolved_name = tool_name if isinstance(tool_name, str) and tool_name else "unknown"
@@ -91,6 +97,12 @@ class ToolExecutor:
                 resolved_name,
                 {"error": "invalid_tool_name"},
                 duration_ms=0,
+            )
+            self._end_tool_span(
+                run_id,
+                span_id,
+                "failed",
+                {"error_type": "schema_violation", "reason": "invalid_tool_name"},
             )
             return
 
@@ -103,6 +115,12 @@ class ToolExecutor:
                 {"error": "invalid_arguments"},
                 duration_ms=0,
             )
+            self._end_tool_span(
+                run_id,
+                span_id,
+                "failed",
+                {"error_type": "schema_violation", "reason": "invalid_arguments"},
+            )
             return
 
         descriptor = self.registry.get_tool(tool_name)
@@ -113,8 +131,23 @@ class ToolExecutor:
                 {"error": "unknown_tool"},
                 duration_ms=0,
             )
+            self._end_tool_span(
+                run_id,
+                span_id,
+                "failed",
+                {"error_type": "schema_violation", "reason": "unknown_tool"},
+            )
             return
 
+        self._annotate_tool_span(
+            run_id,
+            span_id,
+            {
+                "tool_name": descriptor.name,
+                "source": descriptor.source,
+                "permission_scope": descriptor.permission_scope,
+            },
+        )
         permission_context = self._permission_context_for_run(run_id)
         allowed, reason = self.permission_gate.is_allowed(
             descriptor.permission_scope, permission_context
@@ -125,6 +158,12 @@ class ToolExecutor:
                 tool_name,
                 descriptor.permission_scope,
                 reason or "permission_denied",
+            )
+            self._end_tool_span(
+                run_id,
+                span_id,
+                "failed",
+                {"error_type": "permission_denied", "reason": reason or "permission_denied"},
             )
             return
 
@@ -145,6 +184,15 @@ class ToolExecutor:
                 {"error": "server_error"},
                 duration_ms=self._duration_ms(start),
             )
+            self._end_tool_span(
+                run_id,
+                span_id,
+                "failed",
+                {
+                    "error_type": "network_failure",
+                    "server_id": descriptor.server_id,
+                },
+            )
             logger.warning(
                 "tool server error tool=%s server=%s", tool_name, descriptor.server_id, extra={"run_id": run_id}
             )
@@ -159,6 +207,12 @@ class ToolExecutor:
                 {"error": "execution_error"},
                 duration_ms=self._duration_ms(start),
             )
+            self._end_tool_span(
+                run_id,
+                span_id,
+                "failed",
+                {"error_type": "network_failure", "reason": "execution_error"},
+            )
             return
 
         if result.error:
@@ -168,6 +222,12 @@ class ToolExecutor:
                 result.error,
                 duration_ms=self._duration_ms(start),
             )
+            self._end_tool_span(
+                run_id,
+                span_id,
+                "failed",
+                {"error_type": "schema_violation", "reason": "tool_error"},
+            )
             return
 
         await self._emit_success(
@@ -176,6 +236,7 @@ class ToolExecutor:
             result.output or {},
             duration_ms=self._duration_ms(start),
         )
+        self._end_tool_span(run_id, span_id, "success")
 
     async def _emit_success(
         self,
@@ -244,3 +305,43 @@ class ToolExecutor:
     @staticmethod
     def _duration_ms(start: float) -> int:
         return max(int((time.perf_counter() - start) * 1000), 0)
+
+    def _start_tool_span(
+        self,
+        run_id: str,
+        tool_name: str,
+        parent_span_id: str | None,
+    ) -> str | None:
+        if not self.tracer:
+            return None
+        return self.tracer.start_span(
+            run_id,
+            f"tool.{tool_name}",
+            "tool",
+            parent_span_id=parent_span_id,
+            attributes={"tool_name": tool_name},
+        )
+
+    def _annotate_tool_span(
+        self,
+        run_id: str,
+        span_id: str | None,
+        attributes: Mapping[str, object],
+    ) -> None:
+        if not self.tracer or not span_id:
+            return
+        for key, value in attributes.items():
+            self.tracer.add_span_attribute(run_id, span_id, key, value)
+
+    def _end_tool_span(
+        self,
+        run_id: str,
+        span_id: str | None,
+        status: str,
+        error: dict[str, object] | None = None,
+    ) -> None:
+        if not self.tracer or not span_id:
+            return
+        if error and error.get("error_type"):
+            self.tracer.add_span_attribute(run_id, span_id, "error_type", error["error_type"])
+        self.tracer.end_span(run_id, span_id, status, error)

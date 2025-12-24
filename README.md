@@ -8,6 +8,7 @@ Session 6 keeps the event-driven backbone and knowledge foundation from earlier 
 - `frontend/` – Next.js 14 App Router UI with Tailwind styling and streaming hooks/components.
 - `backend/data/events` – JSONL event logs (one file per `run_id`, created automatically).
 - `backend/data/state` – `RunState` snapshots persisted after every node.
+- `backend/data/traces` – Session 8 trace files (`{run_id}.json`) with the trace envelope plus every span.
 - `infra/compose.yaml` – Docker Compose stack. The backend bind-mounts `backend/data` into `/app/data`, and its entrypoint wipes that directory on container start and shutdown so you see live files locally without persisting them between runs.
 - `docs/` – Project overview, per-session prompts, and the Session 5 implementation plan.
 - `backend/data/docs` – Authoritative markdown corpus that ingestion reads on startup. Stable filenames become `document_id` values inside chunk metadata.
@@ -192,6 +193,45 @@ Session 7 replaces the transient coordinator loop with a workflow engine that pe
 - `GET /runs/{run_id}/workflow` returns the persisted workflow state (current step, attempts, pending events, approval flags) so you can inspect or debug a run outside the UI.
 - `POST /runs/{run_id}/approval` with `{"decision":"approved"}` or `{"decision":"rejected"}` records the human decision and causes the workflow engine to resume the paused step.
 - The frontend renders a dedicated Approval Gate with Approve / Reject buttons whenever the workflow emits `workflow.waiting_for_approval`.
+
+## Session 8 – Traces and observability
+
+- Every run now creates a durable trace under `backend/data/traces/{run_id}.json`. Each file stores the trace envelope plus every span (workflow steps, intelligence nodes, tools, model calls, waits, and retries) so you can replay timelines after restarts.
+- Read-only endpoints expose this data: `GET /runs/{run_id}/trace` returns the combined trace/spans payload, while `GET /runs/{run_id}/spans` streams spans only. The frontend’s inspector as well as CLI tooling use these routes.
+- The main UI status card surfaces a thin slice of tracing signals. You will now see explicit messaging when the system is retrying a step, waiting for approval, blocked on an MCP tool, or waiting on retrieval to finish. These hints are derived directly from the workflow spans and stay in sync with the backend.
+- While a run is in flight the frontend polls `/runs/{run_id}/spans` every few seconds, extracts spans with `status=retried` or `status=waiting`, and renders banner chips (“Retry scheduled”, “Waiting for approval”, “Tool running”, “Retrieval pending”). No stack traces or raw errors leak to users—only high-level span metadata.
+- A developer-only Run Inspector lives at `http://localhost:3000/runs/<run_id>/inspect` (there’s also a link on the status card once a run starts). It fetches the stored trace, renders a timeline with parent/child indentation, shows detailed span metadata, and summarizes workflow steps so you can explain any run in minutes—no log tailing required.
+- Typical flow: kick off a run, copy the printed `run_id` (also shown in the UI), open the inspector route in a new tab, and refresh as needed. The trace persists even if you restart the backend, making yesterday’s failures just as inspectable as today’s.
+
+### Trace persistence crash test
+
+1. Start the backend (local or via Docker Compose) and trigger a run that will take a few seconds (tool invocation, retrieval, etc.). Copy the `run_id` from the UI status card.
+2. Tail the trace file while the run is still executing: `jq . backend/data/traces/<run_id>.json` — new spans are appended as soon as they start/end.
+3. Kill the backend (`CTRL+C` or `docker compose stop backend`) before the run finishes. The workflow engine persists `WorkflowState` plus the trace file is already on disk.
+4. Restart the backend. As soon as the workflow resumes, open `http://localhost:3000/runs/<run_id>/inspect` or call `curl http://localhost:8000/runs/<run_id>/trace`. You should see all pre-crash spans intact.
+5. Let the run finish. Re-open the same inspector view—the final spans (retry, wait, finalize, etc.) append to the existing JSON file without overwriting prior data. Repeat the test the next day to confirm “yesterday’s run” is still inspectable without re-running anything.
+
+### Retention / cleanup
+
+Trace files are plain JSON documents under `backend/data/traces` and are not automatically pruned. When running long-lived environments, use the helper script to remove older files:
+
+```bash
+python backend/scripts/purge_traces.py --days 14          # delete traces older than 14 days
+python backend/scripts/purge_traces.py --days 30 --dry-run  # preview deletions without removing files
+```
+
+The script defaults to the repository’s `backend/data/traces` directory but accepts `--traces-dir` if you mount data elsewhere (e.g., inside Docker volumes).
+
+### Observability quick reference
+
+| Artifact | Location / API | Notes |
+| --- | --- | --- |
+| Trace files | `backend/data/traces/{run_id}.json` | Contains `{trace, spans}`; safe to inspect offline. |
+| Full trace API | `GET /runs/{run_id}/trace` | Returns the JSON payload used by the inspector. |
+| Span-only API | `GET /runs/{run_id}/spans` | Useful for lightweight polling (the frontend uses this for Status card alerts). |
+| Run inspector | `http://localhost:3000/runs/{run_id}/inspect` | Dev-only route; also linked from the Status card once a run starts. |
+
+Error types follow the Session 8 classification (e.g., `network_failure`, `bad_plan`, `permission_denied`). You can filter spans by `attributes.error_type` to separate intelligence failures from system issues. All spans share the same `trace_id`, and parent-child relationships mirror real execution order—if a span lacks its parent, treat it as an observability bug.
 
 ## Validation checklist (Session 6)
 

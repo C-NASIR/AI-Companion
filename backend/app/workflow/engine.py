@@ -8,8 +8,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..events import Event, EventBus, new_event
+from ..observability.tracer import Tracer
 from ..state import RunState
 from ..state_store import StateStore
+from .context import ActivityContext
 from .models import (
     ActivityFunc,
     WORKFLOW_NEXT_STEP,
@@ -19,32 +21,9 @@ from .models import (
 )
 from .retries import policy_for_step
 from .store import WorkflowStore
+from .exceptions import ExternalEventRequired, HumanApprovalRequired, WorkflowEngineError
 
 logger = logging.getLogger(__name__)
-
-
-class WorkflowEngineError(Exception):
-    """Base class for workflow-related failures."""
-
-
-class HumanApprovalRequired(WorkflowEngineError):
-    """Raised by activities to pause for human approval."""
-
-    def __init__(self, reason: str | None = None):
-        self.reason = reason or "approval_required"
-        super().__init__(self.reason)
-
-
-class ExternalEventRequired(WorkflowEngineError):
-    """Raised by activities to pause until specific events arrive."""
-
-    def __init__(self, event_types: tuple[str, ...], reason: str | None = None):
-        if not event_types:
-            msg = "ExternalEventRequired requires at least one event type"
-            raise ValueError(msg)
-        self.event_types = event_types
-        self.reason = reason or "external_event_required"
-        super().__init__(self.reason)
 
 
 @dataclass
@@ -63,6 +42,8 @@ class WorkflowRuntime:
     workflow_state: WorkflowState
     queue: asyncio.Queue[WorkflowSignal]
     task: asyncio.Task[None] | None
+    root_span_id: str | None = None
+    active_step_span_id: str | None = None
 
 
 class WorkflowEngine:
@@ -74,11 +55,15 @@ class WorkflowEngine:
         workflow_store: WorkflowStore,
         state_store: StateStore,
         activities: dict[str, ActivityFunc] | None = None,
+        activity_context: ActivityContext | None = None,
+        tracer: Tracer | None = None,
     ):
         self.bus = bus
         self.workflow_store = workflow_store
         self.state_store = state_store
         self.activities = activities or {}
+        self.activity_context = activity_context
+        self.tracer = tracer
         self._runtimes: dict[str, WorkflowRuntime] = {}
         self._lock = asyncio.Lock()
 
@@ -100,6 +85,7 @@ class WorkflowEngine:
                 return
             workflow_state = self.workflow_store.load_or_create(state.run_id)
             runtime = self._build_runtime(state, workflow_state)
+            self._ensure_root_span(runtime)
             self._runtimes[state.run_id] = runtime
             self._start_runtime_task(runtime)
         logger.info(
@@ -134,6 +120,7 @@ class WorkflowEngine:
                 )
                 return
             runtime = self._build_runtime(run_state, workflow_state)
+            self._ensure_root_span(runtime)
             self._runtimes[run_id] = runtime
             self._start_runtime_task(runtime)
         logger.info(
@@ -164,6 +151,7 @@ class WorkflowEngine:
         runtime.workflow_state.set_human_decision(decision)
         runtime.workflow_state.status = WorkflowStatus.RUNNING
         self.workflow_store.save(runtime.workflow_state)
+        self._end_wait_span(runtime, "success")
         logger.info(
             "workflow approval recorded decision=%s",
             decision,
@@ -185,6 +173,7 @@ class WorkflowEngine:
             workflow_state=workflow_state,
             queue=queue,
             task=None,
+            root_span_id=workflow_state.root_span_id,
         )
         return runtime
 
@@ -206,6 +195,7 @@ class WorkflowEngine:
             if not run_state or not workflow_state:
                 return None
             runtime = self._build_runtime(run_state, workflow_state)
+            self._ensure_root_span(runtime)
             self._runtimes[run_id] = runtime
             self._start_runtime_task(runtime)
             await runtime.queue.put(WorkflowSignal(reason="resume"))
@@ -228,6 +218,7 @@ class WorkflowEngine:
                         continue
                     runtime.workflow_state.clear_pending_events()
                     self.workflow_store.save(runtime.workflow_state)
+                    self._end_wait_span(runtime, "success")
                     logger.info(
                         "workflow resumed from external event type=%s",
                         signal.event.type,
@@ -275,6 +266,7 @@ class WorkflowEngine:
                     "workflow.completed",
                     {},
                 )
+                self._finish_trace(runtime, "success")
                 return
             activity = self.activities.get(current_step)
             if not activity:
@@ -287,6 +279,7 @@ class WorkflowEngine:
                     "workflow.failed",
                     {"step": current_step},
                 )
+                self._finish_trace(runtime, "failed")
                 return
             attempt = runtime.workflow_state.record_attempt(current_step)
             self.workflow_store.save(runtime.workflow_state)
@@ -301,6 +294,7 @@ class WorkflowEngine:
                 "workflow.step.started",
                 {"step": current_step, "attempt": attempt},
             )
+            self._start_workflow_span(runtime, current_step, attempt)
             try:
                 updated_run_state, updated_workflow_state = await activity(
                     runtime.run_state, runtime.workflow_state
@@ -312,6 +306,17 @@ class WorkflowEngine:
             except HumanApprovalRequired as exc:
                 runtime.workflow_state.mark_waiting_for_human()
                 self.workflow_store.save(runtime.workflow_state)
+                self._end_workflow_span(
+                    runtime,
+                    "waiting",
+                    {"error_type": "approval_wait", "reason": exc.reason},
+                )
+                self._start_wait_span(
+                    runtime,
+                    kind="human_approval",
+                    reason=exc.reason,
+                    metadata={"step": current_step},
+                )
                 logger.info(
                     "workflow waiting for approval step=%s reason=%s",
                     current_step,
@@ -332,6 +337,24 @@ class WorkflowEngine:
                     "reason": exc.reason,
                 }
                 self.workflow_store.save(runtime.workflow_state)
+                self._end_workflow_span(
+                    runtime,
+                    "waiting",
+                    {
+                        "error_type": "tool_wait",
+                        "reason": exc.reason,
+                        "events": list(exc.event_types),
+                    },
+                )
+                self._start_wait_span(
+                    runtime,
+                    kind="external_event",
+                    reason=exc.reason,
+                    metadata={
+                        "step": current_step,
+                        "events": ",".join(exc.event_types),
+                    },
+                )
                 logger.info(
                     "workflow waiting for events step=%s events=%s reason=%s",
                     current_step,
@@ -350,13 +373,16 @@ class WorkflowEngine:
                 )
                 return
             except Exception as exc:
-                should_continue = await self._handle_activity_failure(
+                should_continue, error_payload = await self._handle_activity_failure(
                     runtime, current_step, exc
                 )
+                status = "retried" if should_continue else "failed"
+                self._end_workflow_span(runtime, status, error_payload)
                 if should_continue:
                     continue
                 return
 
+            self._end_workflow_span(runtime, "success")
             await self._emit_workflow_event(
                 runtime.run_state.run_id,
                 "workflow.step.completed",
@@ -384,6 +410,7 @@ class WorkflowEngine:
                 "workflow completed",
                 extra={"run_id": runtime.run_state.run_id},
             )
+            self._finish_trace(runtime, "success")
             return
 
     async def _handle_activity_failure(
@@ -391,10 +418,10 @@ class WorkflowEngine:
         runtime: WorkflowRuntime,
         step: str,
         exc: Exception,
-    ) -> bool:
+    ) -> tuple[bool, dict[str, Any]]:
         """Handle retries for a failed activity.
 
-        Returns True if the engine should retry the step, False if the workflow is terminal.
+        Returns (should_retry, error_payload).
         """
         attempt = runtime.workflow_state.attempts.get(step, 1)
         policy = policy_for_step(step)
@@ -404,6 +431,7 @@ class WorkflowEngine:
             "error": exc.__class__.__name__,
             "message": str(exc),
         }
+        error_payload["error_type"] = self._error_type_for_step(step)
         if policy.allows(attempt):
             runtime.workflow_state.mark_retrying(error_payload)
             self.workflow_store.save(runtime.workflow_state)
@@ -425,7 +453,7 @@ class WorkflowEngine:
                 policy.backoff_seconds,
                 extra={"run_id": runtime.run_state.run_id},
             )
-            return True
+            return True, error_payload
         runtime.workflow_state.mark_failed(error_payload)
         self.workflow_store.save(runtime.workflow_state)
         await self._emit_workflow_event(
@@ -439,7 +467,8 @@ class WorkflowEngine:
             attempt,
             extra={"run_id": runtime.run_state.run_id},
         )
-        return False
+        self._finish_trace(runtime, "failed")
+        return False, error_payload
 
     async def _emit_workflow_event(
         self,
@@ -454,3 +483,121 @@ class WorkflowEngine:
             else data.get("status")
         )
         await self.bus.publish(new_event(event_type, run_id, payload))
+
+    def _ensure_root_span(self, runtime: WorkflowRuntime) -> None:
+        if not self.tracer or runtime.root_span_id:
+            return
+        run_id = runtime.run_state.run_id
+        span_id = self.tracer.start_span(
+            run_id,
+            "workflow.run",
+            "workflow",
+            attributes={"run_id": run_id},
+        )
+        runtime.root_span_id = span_id
+        runtime.workflow_state.root_span_id = span_id
+        self.workflow_store.save(runtime.workflow_state)
+        self.tracer.set_root_span(run_id, span_id)
+
+    def _start_workflow_span(self, runtime: WorkflowRuntime, step: str, attempt: int) -> None:
+        if not self.tracer:
+            return
+        parent_span_id = runtime.root_span_id
+        span_id = self.tracer.start_span(
+            runtime.run_state.run_id,
+            f"workflow.{step}",
+            "workflow",
+            parent_span_id=parent_span_id,
+            attributes={"step": step, "attempt": attempt},
+        )
+        runtime.active_step_span_id = span_id
+        if self.activity_context:
+            self.activity_context.set_active_workflow_span(runtime.run_state.run_id, span_id)
+
+    def _end_workflow_span(
+        self,
+        runtime: WorkflowRuntime,
+        status: str,
+        error: dict[str, Any] | None = None,
+    ) -> None:
+        if self.activity_context:
+            self.activity_context.set_active_workflow_span(runtime.run_state.run_id, None)
+        span_id = runtime.active_step_span_id
+        runtime.active_step_span_id = None
+        if not self.tracer or not span_id:
+            return
+        if error and error.get("error_type"):
+            self.tracer.add_span_attribute(
+                runtime.run_state.run_id,
+                span_id,
+                "error_type",
+                error["error_type"],
+            )
+        self.tracer.end_span(runtime.run_state.run_id, span_id, status, error)
+
+    def _start_wait_span(
+        self,
+        runtime: WorkflowRuntime,
+        *,
+        kind: str,
+        reason: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        if not self.tracer:
+            return
+        if runtime.workflow_state.wait_span_id:
+            return
+        attributes = {"wait_kind": kind}
+        attributes.update(metadata)
+        span_id = self.tracer.start_span(
+            runtime.run_state.run_id,
+            f"workflow.wait.{kind}",
+            "workflow",
+            parent_span_id=runtime.root_span_id,
+            attributes=attributes,
+        )
+        runtime.workflow_state.wait_span_id = span_id
+        runtime.workflow_state.wait_kind = kind
+        runtime.workflow_state.wait_reason = reason
+        self.workflow_store.save(runtime.workflow_state)
+
+    def _end_wait_span(self, runtime: WorkflowRuntime, status: str) -> None:
+        span_id = runtime.workflow_state.wait_span_id
+        if not span_id or not self.tracer:
+            runtime.workflow_state.wait_span_id = None
+            runtime.workflow_state.wait_kind = None
+            runtime.workflow_state.wait_reason = None
+            self.workflow_store.save(runtime.workflow_state)
+            return
+        error_payload = None
+        if status != "success":
+            error_payload = {
+                "error_type": "tool_wait"
+                if runtime.workflow_state.wait_kind == "external_event"
+                else "approval_wait",
+                "reason": runtime.workflow_state.wait_reason or "",
+            }
+        self.tracer.end_span(runtime.run_state.run_id, span_id, status, error_payload)
+        runtime.workflow_state.wait_span_id = None
+        runtime.workflow_state.wait_kind = None
+        runtime.workflow_state.wait_reason = None
+        self.workflow_store.save(runtime.workflow_state)
+
+    def _finish_trace(self, runtime: WorkflowRuntime, status: str) -> None:
+        if not self.tracer or not runtime.root_span_id:
+            return
+        run_id = runtime.run_state.run_id
+        self.tracer.end_span(run_id, runtime.root_span_id, status, None)
+        self.tracer.complete_trace(run_id, status)
+        runtime.root_span_id = None
+        runtime.workflow_state.root_span_id = None
+        self.workflow_store.save(runtime.workflow_state)
+
+    @staticmethod
+    def _error_type_for_step(step: str) -> str:
+        mapping = {
+            "plan": "bad_plan",
+            "retrieve": "retrieval_failure",
+            "verify": "verification_failure",
+        }
+        return mapping.get(step, "network_failure")

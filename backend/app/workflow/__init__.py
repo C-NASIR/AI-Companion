@@ -2,7 +2,8 @@
 
 from .activities import build_activity_map
 from .context import ActivityContext
-from .engine import ExternalEventRequired, HumanApprovalRequired, WorkflowEngine
+from .engine import WorkflowEngine
+from .exceptions import ExternalEventRequired, HumanApprovalRequired
 from .models import WorkflowState, WorkflowStatus
 from .retries import RetryPolicy, STEP_RETRY_RULES
 from .store import WorkflowStore

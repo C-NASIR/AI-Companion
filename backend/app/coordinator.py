@@ -8,6 +8,7 @@ from typing import Mapping
 from .events import Event, EventBus, new_event
 from .state import RunState
 from .state_store import StateStore
+from .observability.tracer import Tracer
 from .workflow import ActivityContext, WorkflowEngine
 
 logger = logging.getLogger(__name__)
@@ -22,16 +23,20 @@ class RunCoordinator:
         state_store: StateStore,
         workflow_engine: WorkflowEngine,
         activity_ctx: ActivityContext,
+        tracer: Tracer | None = None,
     ):
         self.bus = bus
         self.state_store = state_store
         self.workflow_engine = workflow_engine
         self.activity_ctx = activity_ctx
+        self.tracer = tracer
         self._unsubscribe = self.bus.subscribe_all(self._handle_event)
 
     async def start_run(self, state: RunState) -> None:
         """Persist initial state, emit run.started, and delegate to workflow engine."""
         run_id = state.run_id
+        if self.tracer:
+            self.tracer.start_trace(run_id)
         self.state_store.save(state)
         await self.bus.publish(
             new_event(
