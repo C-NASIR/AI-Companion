@@ -2,11 +2,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   fetchRunState,
+  fetchWorkflowState,
   startRunRequest,
+  submitApprovalDecisionRequest,
   subscribeToRunEvents,
+  type ApprovalDecision,
   type ChatMode,
   type RunEvent,
   type RunEventSubscription,
+  type WorkflowStatusValue,
 } from "../lib/backend";
 import {
   NODE_TO_STEP_LABEL,
@@ -36,6 +40,33 @@ export interface SubmissionMeta {
 export interface StatusDisplay {
   label: string;
   hint: string;
+}
+
+export interface WorkflowSummary {
+  status: WorkflowStatusValue | null;
+  currentStep: string | null;
+  currentAttempt: number | null;
+  retry:
+    | {
+        step: string;
+        attempt: number;
+        backoffSeconds: number;
+      }
+    | null;
+  waitingForEvents:
+    | {
+        events: string[];
+        reason: string | null;
+      }
+    | null;
+}
+
+export interface ApprovalState {
+  waiting: boolean;
+  reason: string | null;
+  decision: string | null;
+  isSubmitting: boolean;
+  error: string | null;
 }
 
 interface UseChatRunArgs {
@@ -84,6 +115,28 @@ const INITIAL_TOOL_CONTEXT: ToolContextState = {
   lastToolStatus: null,
 };
 
+const isWorkflowStatusValue = (
+  value: unknown
+): value is WorkflowStatusValue =>
+  value === "running" ||
+  value === "waiting_for_approval" ||
+  value === "retrying" ||
+  value === "completed" ||
+  value === "failed";
+
+const toNumber = (value: unknown): number | null => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return null;
+};
+
 export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
   const [statusValue, setStatusValue] = useState<StatusValue | null>(null);
   const [steps, setSteps] = useState<StepStateMap>(() => createInitialSteps());
@@ -105,6 +158,25 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
   const [toolContext, setToolContext] = useState<ToolContextState>(
     INITIAL_TOOL_CONTEXT
   );
+  const [workflowStatus, setWorkflowStatus] =
+    useState<WorkflowStatusValue | null>(null);
+  const [workflowCurrentStep, setWorkflowCurrentStep] = useState<string | null>(
+    null
+  );
+  const [workflowAttempts, setWorkflowAttempts] = useState<Record<string, number>>(
+    {}
+  );
+  const [workflowRetryInfo, setWorkflowRetryInfo] = useState<WorkflowSummary["retry"]>(
+    null
+  );
+  const [workflowWaitingInfo, setWorkflowWaitingInfo] =
+    useState<WorkflowSummary["waitingForEvents"]>(null);
+  const [approvalPending, setApprovalPending] = useState<{
+    reason: string | null;
+  } | null>(null);
+  const [approvalDecision, setApprovalDecision] = useState<string | null>(null);
+  const [isSubmittingApproval, setIsSubmittingApproval] = useState(false);
+  const [approvalError, setApprovalError] = useState<string | null>(null);
 
   const [formError, setFormError] = useState<string | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
@@ -177,6 +249,14 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
     setRetrievalAttempted(false);
     setAvailableTools([]);
     setToolContext(INITIAL_TOOL_CONTEXT);
+    setWorkflowStatus(null);
+    setWorkflowCurrentStep(null);
+    setWorkflowAttempts({});
+    setWorkflowRetryInfo(null);
+    setWorkflowWaitingInfo(null);
+    setApprovalPending(null);
+    setApprovalDecision(null);
+    setApprovalError(null);
     lastSeqRef.current = 0;
   }, []);
 
@@ -198,6 +278,134 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
       case "run.started": {
         setSteps(createInitialSteps());
         setRetrievalAttempted(false);
+        break;
+      }
+
+      case "workflow.started": {
+        const step =
+          typeof event.data?.current_step === "string"
+            ? event.data.current_step
+            : null;
+        setWorkflowCurrentStep(step);
+        setWorkflowAttempts({});
+        setWorkflowRetryInfo(null);
+        setWorkflowWaitingInfo(null);
+        setApprovalPending(null);
+        setApprovalDecision(null);
+        if (isWorkflowStatusValue(event.data?.status)) {
+          setWorkflowStatus(event.data.status);
+        }
+        break;
+      }
+
+      case "workflow.step.started": {
+        const step =
+          typeof event.data?.step === "string" ? event.data.step : null;
+        if (step) {
+          setWorkflowCurrentStep(step);
+          const attempt = toNumber(event.data?.attempt) ?? 1;
+          setWorkflowAttempts((prev) => ({
+            ...prev,
+            [step]: attempt,
+          }));
+        }
+        setWorkflowRetryInfo(null);
+        setWorkflowWaitingInfo(null);
+        if (isWorkflowStatusValue(event.data?.status)) {
+          setWorkflowStatus(event.data.status);
+        }
+        break;
+      }
+
+      case "workflow.step.completed": {
+        if (isWorkflowStatusValue(event.data?.status)) {
+          setWorkflowStatus(event.data.status);
+        }
+        setWorkflowRetryInfo(null);
+        setWorkflowWaitingInfo(null);
+        break;
+      }
+
+      case "workflow.retrying": {
+        const step =
+          typeof event.data?.step === "string" ? event.data.step : null;
+        const attempt = toNumber(event.data?.attempt) ?? null;
+        const backoff = toNumber(event.data?.backoff_seconds) ?? 0;
+        if (step && attempt) {
+          setWorkflowRetryInfo({
+            step,
+            attempt,
+            backoffSeconds: backoff,
+          });
+          setWorkflowAttempts((prev) => ({
+            ...prev,
+            [step]: attempt,
+          }));
+        }
+        setWorkflowWaitingInfo(null);
+        if (isWorkflowStatusValue(event.data?.status)) {
+          setWorkflowStatus(event.data.status);
+        }
+        break;
+      }
+
+      case "workflow.waiting_for_event": {
+        const events = Array.isArray(event.data?.event_types)
+          ? (event.data.event_types as string[])
+          : [];
+        const reason =
+          typeof event.data?.reason === "string" ? event.data.reason : null;
+        setWorkflowWaitingInfo({
+          events,
+          reason,
+        });
+        if (isWorkflowStatusValue(event.data?.status)) {
+          setWorkflowStatus(event.data.status);
+        }
+        break;
+      }
+
+      case "workflow.waiting_for_approval": {
+        const reason =
+          typeof event.data?.reason === "string" ? event.data.reason : null;
+        setApprovalPending({ reason });
+        if (isWorkflowStatusValue(event.data?.status)) {
+          setWorkflowStatus(event.data.status);
+        } else {
+          setWorkflowStatus("waiting_for_approval");
+        }
+        break;
+      }
+
+      case "workflow.approval.recorded": {
+        const decision =
+          typeof event.data?.decision === "string"
+            ? event.data.decision
+            : null;
+        setApprovalPending(null);
+        if (decision) {
+          setApprovalDecision(decision);
+        }
+        if (isWorkflowStatusValue(event.data?.status)) {
+          setWorkflowStatus(event.data.status);
+        } else {
+          setWorkflowStatus("running");
+        }
+        break;
+      }
+
+      case "workflow.completed":
+      case "workflow.failed": {
+        if (isWorkflowStatusValue(event.data?.status)) {
+          setWorkflowStatus(event.data.status);
+        } else if (event.type === "workflow.completed") {
+          setWorkflowStatus("completed");
+        } else {
+          setWorkflowStatus("failed");
+        }
+        setWorkflowRetryInfo(null);
+        setWorkflowWaitingInfo(null);
+        setApprovalPending(null);
         break;
       }
 
@@ -473,6 +681,64 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
     };
   }, [runComplete, currentRunId]);
 
+  useEffect(() => {
+    if (!currentRunId) {
+      return;
+    }
+    let cancelled = false;
+    fetchWorkflowState(currentRunId)
+      .then((state) => {
+        if (cancelled || !state) {
+          return;
+        }
+        if (isWorkflowStatusValue(state.status)) {
+          setWorkflowStatus(state.status);
+        }
+        if (typeof state.current_step === "string") {
+          setWorkflowCurrentStep(state.current_step);
+        }
+        if (state.attempts && typeof state.attempts === "object") {
+          const normalized: Record<string, number> = {};
+          Object.entries(state.attempts).forEach(([key, value]) => {
+            const attempt = toNumber(value);
+            if (attempt) {
+              normalized[key] = attempt;
+            }
+          });
+          setWorkflowAttempts(normalized);
+        }
+        if (state.waiting_for_human) {
+          const reason =
+            typeof state.last_error?.reason === "string"
+              ? (state.last_error.reason as string)
+              : null;
+          setApprovalPending({ reason });
+        } else {
+          setApprovalPending(null);
+        }
+        setApprovalDecision(state.human_decision ?? null);
+        if (Array.isArray(state.pending_events) && state.pending_events.length) {
+          setWorkflowWaitingInfo({
+            events: state.pending_events as string[],
+            reason:
+              typeof state.last_error?.reason === "string"
+                ? (state.last_error.reason as string)
+                : null,
+          });
+        } else {
+          setWorkflowWaitingInfo(null);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setWorkflowStatus((prev) => prev);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentRunId]);
+
   const handleSend = useCallback(async () => {
     const trimmedMessage = message.trim();
     const trimmedContext = context.trim();
@@ -524,6 +790,57 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
     }
   }, [connectToRunEvents, context, message, mode, resetRunView]);
 
+  const handleApprovalDecision = useCallback(
+    async (decision: ApprovalDecision) => {
+      if (!currentRunId) {
+        setApprovalError("No active run to approve.");
+        return;
+      }
+      setIsSubmittingApproval(true);
+      setApprovalError(null);
+      try {
+        await submitApprovalDecisionRequest(currentRunId, decision);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setApprovalError(msg);
+      } finally {
+        setIsSubmittingApproval(false);
+      }
+    },
+    [currentRunId]
+  );
+
+  const workflowSummary: WorkflowSummary = useMemo(() => {
+    const attempt =
+      workflowCurrentStep && workflowAttempts[workflowCurrentStep]
+        ? workflowAttempts[workflowCurrentStep]
+        : null;
+    return {
+      status: workflowStatus,
+      currentStep: workflowCurrentStep,
+      currentAttempt: attempt,
+      retry: workflowRetryInfo,
+      waitingForEvents: workflowWaitingInfo,
+    };
+  }, [
+    workflowStatus,
+    workflowCurrentStep,
+    workflowAttempts,
+    workflowRetryInfo,
+    workflowWaitingInfo,
+  ]);
+
+  const approvalState: ApprovalState = useMemo(
+    () => ({
+      waiting: Boolean(approvalPending),
+      reason: approvalPending?.reason ?? null,
+      decision: approvalDecision,
+      isSubmitting: isSubmittingApproval,
+      error: approvalError,
+    }),
+    [approvalPending, approvalDecision, isSubmittingApproval, approvalError]
+  );
+
   return {
     canSend,
     currentRunId,
@@ -544,5 +861,8 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
     retrievalAttempted,
     availableTools,
     toolContext,
+    workflowSummary,
+    approvalState,
+    handleApprovalDecision,
   };
 };

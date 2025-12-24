@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 
+import ApprovalGate from "../components/ApprovalGate";
 import ChatForm from "../components/ChatForm";
 import FeedbackPanel from "../components/FeedbackPanel";
 import ResponsePanel from "../components/ResponsePanel";
@@ -44,6 +45,16 @@ export default function HomePage() {
           currentRunId={chatRun.currentRunId}
           runOutcome={chatRun.runOutcome}
           runOutcomeReason={chatRun.runOutcomeReason}
+          workflowSummary={chatRun.workflowSummary}
+        />
+        <ApprovalGate
+          waiting={chatRun.approvalState.waiting}
+          reason={chatRun.approvalState.reason}
+          decision={chatRun.approvalState.decision}
+          isSubmitting={chatRun.approvalState.isSubmitting}
+          error={chatRun.approvalState.error}
+          onApprove={() => chatRun.handleApprovalDecision("approved")}
+          onReject={() => chatRun.handleApprovalDecision("rejected")}
         />
         <div className="flex flex-col gap-4 md:flex-row">
           <ResponsePanel

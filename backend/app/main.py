@@ -14,6 +14,7 @@ from .api import (
     MCP_REGISTRY,
     PERMISSION_GATE,
     RETRIEVAL_STORE,
+    RUN_COORDINATOR,
     STATE_STORE,
     router,
 )
@@ -108,6 +109,7 @@ def create_app() -> FastAPI:
     @app.on_event("shutdown")
     async def _shutdown() -> None:
         await TOOL_EXECUTOR.shutdown()
+        await RUN_COORDINATOR.shutdown()
 
     @app.get("/health")
     async def health() -> dict[str, str]:

@@ -1,4 +1,4 @@
-import type { ChatMode } from "./backend";
+import type { ChatMode, WorkflowStatusValue } from "./backend";
 import type { StepVisualState } from "./chatTypes";
 
 export const MODES: Array<{ value: ChatMode; label: string }> = [
@@ -19,6 +19,7 @@ export const STEP_LABELS = [
   "Tool executed",
   "Tool denied",
   "Verify",
+  "Approval",
   "Finalize",
 ] as const;
 
@@ -35,6 +36,7 @@ export const NODE_TO_STEP_LABEL: Record<string, (typeof STEP_LABELS)[number]> = 
   retrieve: "Retrieve",
   respond: "Respond",
   verify: "Verify",
+  maybe_approve: "Approval",
   finalize: "Finalize",
 };
 
@@ -64,6 +66,23 @@ export const STATUS_HINTS: Record<StatusValue, string> = {
   thinking: "Planning or verification is in progress.",
   responding: "Output chunks are flowing through the event log.",
   complete: "Run finished. Review output or send feedback.",
+};
+
+export const WORKFLOW_STATUS_LABELS: Record<WorkflowStatusValue, string> = {
+  running: "Running",
+  waiting_for_approval: "Waiting for approval",
+  retrying: "Retrying",
+  completed: "Workflow completed",
+  failed: "Workflow failed",
+};
+
+export const WORKFLOW_STATUS_HINTS: Record<WorkflowStatusValue, string> = {
+  running: "Steps are executing via the durable workflow engine.",
+  waiting_for_approval:
+    "Execution paused until you approve or reject the pending step.",
+  retrying: "A step failed and will re-run after the configured backoff.",
+  completed: "Workflow reached the finalize step successfully.",
+  failed: "Retries exhausted or an unrecoverable error occurred.",
 };
 
 export const DECISION_LABELS: Record<string, string> = {

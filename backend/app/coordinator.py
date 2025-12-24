@@ -1,71 +1,38 @@
-"""Run coordinator that advances the intelligence graph via events."""
+"""Workflow-aware run coordinator bridging events and the engine."""
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from typing import Callable, Mapping
+from typing import Mapping
 
 from .events import Event, EventBus, new_event
-from .intelligence import GRAPH, NODE_MAP, NodeContext
-from .mcp.registry import MCPRegistry
-from .permissions import PermissionGate
-from .retrieval import RetrievalStore
-from .state import RunPhase, RunState
+from .state import RunState
 from .state_store import StateStore
+from .workflow import ActivityContext, WorkflowEngine
 
 logger = logging.getLogger(__name__)
 
-NODE_SEQUENCE = [spec.name for spec in GRAPH]
-NEXT_NODE: dict[str, str | None] = {
-    current: NODE_SEQUENCE[idx + 1] if idx + 1 < len(NODE_SEQUENCE) else None
-    for idx, current in enumerate(NODE_SEQUENCE)
-}
-
 
 class RunCoordinator:
-    """Coordinates node execution driven by the event log."""
+    """Bridges API requests, tool events, and the workflow engine."""
 
     def __init__(
         self,
         bus: EventBus,
         state_store: StateStore,
-        retrieval_store: RetrievalStore,
-        tool_registry: MCPRegistry,
-        permission_gate: PermissionGate,
+        workflow_engine: WorkflowEngine,
+        activity_ctx: ActivityContext,
     ):
         self.bus = bus
         self.state_store = state_store
-        self.retrieval_store = retrieval_store
-        self.tool_registry = tool_registry
-        self.permission_gate = permission_gate
-        self._tasks: dict[str, asyncio.Task[None]] = {}
+        self.workflow_engine = workflow_engine
+        self.activity_ctx = activity_ctx
+        self._unsubscribe = self.bus.subscribe_all(self._handle_event)
 
     async def start_run(self, state: RunState) -> None:
-        """Persist initial state, emit run.started, and schedule coordination loop."""
+        """Persist initial state, emit run.started, and delegate to workflow engine."""
         run_id = state.run_id
-        if run_id in self._tasks:
-            logger.warning("run already active", extra={"run_id": run_id})
-            return
-
         self.state_store.save(state)
-        queue: asyncio.Queue[Event] = asyncio.Queue()
-
-        async def _subscriber(event: Event) -> None:
-            await queue.put(event)
-
-        unsubscribe = self.bus.subscribe(run_id, _subscriber)
-        ctx = NodeContext(
-            self.bus,
-            self.state_store,
-            self.retrieval_store,
-            allowed_tools_provider=self._build_allowed_tools_provider(),
-        )
-        task = asyncio.create_task(
-            self._run_loop(state, queue, unsubscribe, ctx), name=f"run-{run_id}"
-        )
-        self._tasks[run_id] = task
-
         await self.bus.publish(
             new_event(
                 "run.started",
@@ -77,94 +44,40 @@ class RunCoordinator:
                 },
             )
         )
-        logger.info("run scheduled", extra={"run_id": run_id})
+        await self.workflow_engine.start_run(state)
+        logger.info("workflow queued", extra={"run_id": run_id})
 
-    def _build_allowed_tools_provider(self) -> Callable[[RunState], list]:
-        def _provider(current_state: RunState) -> list:
-            context = self.permission_gate.build_context(
-                user_role="human",
-                run_type=current_state.mode.value,
-            )
-            return self.permission_gate.filter_allowed(
-                self.tool_registry.list_tools(),
-                context,
-            )
+    async def shutdown(self) -> None:
+        """Cleanup subscriptions."""
+        if self._unsubscribe:
+            self._unsubscribe()
+            self._unsubscribe = None
 
-        return _provider
+    async def _handle_event(self, event: Event) -> None:
+        if event.type in {"tool.completed", "tool.failed", "tool.denied"}:
+            await self._handle_tool_event(event)
 
-    async def _run_loop(
-        self,
-        state: RunState,
-        queue: asyncio.Queue[Event],
-        unsubscribe: Callable[[], None],
-        ctx: NodeContext,
-    ) -> None:
-        run_id = state.run_id
-        try:
-            while True:
-                event = await queue.get()
-                if event.type in {"run.completed", "run.failed"}:
-                    logger.info(
-                        "run finished via event type=%s", event.type, extra={"run_id": run_id}
-                    )
-                    break
-                if event.type in {"tool.completed", "tool.failed", "tool.denied"}:
-                    await self._handle_tool_event(state, ctx, event)
-                next_node = self._next_node_for_event(state, event)
-                if not next_node:
-                    continue
-                spec = NODE_MAP.get(next_node)
-                if not spec:
-                    logger.warning(
-                        "unknown node referenced=%s", next_node, extra={"run_id": run_id}
-                    )
-                    continue
-                try:
-                    await spec.func(state, ctx)
-                except Exception:
-                    logger.exception(
-                        "node %s failed", next_node, extra={"run_id": run_id}
-                    )
-                    await self.bus.publish(
-                        new_event(
-                            "error.raised",
-                            run_id,
-                            {"node": next_node, "message": "internal error"},
-                        )
-                    )
-                    await self.bus.publish(
-                        new_event(
-                            "run.failed",
-                            run_id,
-                            {"final_text": state.output_text, "reason": "internal error"},
-                        )
-                    )
-                    break
-        finally:
-            unsubscribe()
-            self._tasks.pop(run_id, None)
-            logger.info("run coordinator loop ended", extra={"run_id": run_id})
-
-    async def _handle_tool_event(self, state: RunState, ctx: NodeContext, event: Event) -> None:
-        run_id = state.run_id
+    async def _handle_tool_event(self, event: Event) -> None:
+        run_id = event.run_id
+        state = self.state_store.load(run_id)
+        if not state:
+            logger.warning("received tool event for unknown run", extra={"run_id": run_id})
+            return
         tool_name = event.data.get("tool_name")
-        if not isinstance(tool_name, str):
+        if not isinstance(tool_name, str) or not tool_name:
             tool_name = "unknown"
         duration_ms = int(event.data.get("duration_ms") or 0)
-        next_phase = RunPhase.RESPOND
         if event.type == "tool.completed":
-            output = event.data.get("output")
-            if not isinstance(output, Mapping):
-                output = {}
+            payload = self._coerce_mapping(event.data.get("output"))
             state.record_tool_result(
                 name=tool_name,
                 status="completed",
-                payload=output,
+                payload=payload,
                 duration_ms=duration_ms,
             )
             notes = f"{tool_name} completed"
             state.record_decision("tool_result", "completed", notes=notes)
-            await ctx.emit_decision(state, "tool_result", "completed", notes)
+            await self.activity_ctx.emit_decision(state, "tool_result", "completed", notes)
             logger.info(
                 "tool completed recorded tool=%s duration_ms=%s",
                 tool_name,
@@ -172,62 +85,47 @@ class RunCoordinator:
                 extra={"run_id": run_id},
             )
         elif event.type == "tool.failed":
-            error = event.data.get("error")
-            if not isinstance(error, Mapping):
-                error = {"error": "unknown"}
+            error = self._coerce_mapping(event.data.get("error"), default={"error": "unknown"})
             state.record_tool_result(
                 name=tool_name,
                 status="failed",
                 payload=error,
                 duration_ms=duration_ms,
             )
-            error_reason = error.get("error")
-            reason_str = (
-                error_reason if isinstance(error_reason, str) else "tool_failed"
-            )
+            reason = error.get("error")
+            reason_str = reason if isinstance(reason, str) and reason else "tool_failed"
             state.record_decision("tool_result", "failed", notes=reason_str)
-            await ctx.emit_decision(state, "tool_result", "failed", reason_str)
-            state.set_verification(passed=False, reason="tool_failed")
+            await self.activity_ctx.emit_decision(state, "tool_result", "failed", reason_str)
             logger.warning(
                 "tool failed tool=%s reason=%s",
                 tool_name,
                 reason_str,
                 extra={"run_id": run_id},
             )
-            next_phase = RunPhase.FINALIZE
         else:  # tool.denied
             reason = event.data.get("reason")
             if not isinstance(reason, str) or not reason:
                 reason = "permission_denied"
             state.set_tool_denied(reason)
             state.record_decision("tool_result", "denied", notes=reason)
-            await ctx.emit_decision(state, "tool_result", "denied", reason)
+            await self.activity_ctx.emit_decision(state, "tool_result", "denied", reason)
             state.record_tool_result(
                 name=tool_name,
                 status="failed",
                 payload={"error": reason},
                 duration_ms=0,
             )
-            state.set_verification(passed=False, reason="tool_denied")
-            next_phase = RunPhase.FINALIZE
             logger.warning(
-                "tool denied tool=%s reason=%s", tool_name, reason, extra={"run_id": run_id}
+                "tool denied tool=%s reason=%s",
+                tool_name,
+                reason,
+                extra={"run_id": run_id},
             )
-        state.transition_phase(next_phase)
-        ctx.save_state(state)
+        self.activity_ctx.save_state(state)
+        await self.workflow_engine.handle_event(event)
 
     @staticmethod
-    def _next_node_for_event(state: RunState, event: Event) -> str | None:
-        if event.type == "run.started":
-            return NODE_SEQUENCE[0]
-        if event.type == "tool.completed":
-            return "verify"
-        if event.type in {"tool.failed", "tool.denied"}:
-            return "finalize"
-        if event.type == "node.completed":
-            if state.phase == RunPhase.WAITING_FOR_TOOL:
-                return None
-            completed_name = event.data.get("name")
-            if isinstance(completed_name, str):
-                return NEXT_NODE.get(completed_name)
-        return None
+    def _coerce_mapping(value: object, default: Mapping[str, object] | None = None) -> Mapping[str, object]:
+        if isinstance(value, Mapping):
+            return value
+        return default or {}

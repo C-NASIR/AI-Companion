@@ -20,7 +20,16 @@ export type RunEventType =
   | "tool.denied"
   | "tool.server.error"
   | "retrieval.started"
-  | "retrieval.completed";
+  | "retrieval.completed"
+  | "workflow.started"
+  | "workflow.step.started"
+  | "workflow.step.completed"
+  | "workflow.retrying"
+  | "workflow.waiting_for_event"
+  | "workflow.waiting_for_approval"
+  | "workflow.approval.recorded"
+  | "workflow.completed"
+  | "workflow.failed";
 
 export interface RunEvent {
   id: string;
@@ -32,6 +41,12 @@ export interface RunEvent {
 }
 
 export type StatusValue = "received" | "thinking" | "responding" | "complete";
+export type WorkflowStatusValue =
+  | "running"
+  | "waiting_for_approval"
+  | "retrying"
+  | "completed"
+  | "failed";
 
 export type FeedbackScore = "up" | "down";
 
@@ -187,6 +202,19 @@ export interface RunStatePayload {
   last_tool_status?: string | null;
 }
 
+export interface WorkflowStatePayload {
+  run_id: string;
+  current_step: string | null;
+  status: WorkflowStatusValue;
+  attempts?: Record<string, number>;
+  waiting_for_human: boolean;
+  human_decision?: string | null;
+  last_error?: Record<string, unknown> | null;
+  pending_events?: string[];
+}
+
+export type ApprovalDecision = "approved" | "rejected";
+
 export interface AvailableToolEntry {
   name: string;
   source: string;
@@ -208,4 +236,39 @@ export async function fetchRunState(
   }
   const payload = (await response.json()) as RunStatePayload;
   return payload;
+}
+
+export async function fetchWorkflowState(
+  runId: string
+): Promise<WorkflowStatePayload | null> {
+  const response = await fetch(`${getBackendUrl()}/runs/${runId}/workflow`, {
+    method: "GET",
+  });
+  if (response.status === 404) {
+    return null;
+  }
+  if (!response.ok) {
+    throw new Error(`Failed to load workflow state: ${response.status}`);
+  }
+  const payload = (await response.json()) as WorkflowStatePayload;
+  return payload;
+}
+
+export async function submitApprovalDecisionRequest(
+  runId: string,
+  decision: ApprovalDecision
+): Promise<void> {
+  const response = await fetch(`${getBackendUrl()}/runs/${runId}/approval`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ decision }),
+  });
+  if (!response.ok) {
+    const message = await response.text().catch(() => null);
+    throw new Error(
+      message || `Failed to submit approval decision: ${response.status}`
+    );
+  }
 }

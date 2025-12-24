@@ -39,6 +39,7 @@ class RunPhase(str, Enum):
     RESPOND = "respond"
     WAITING_FOR_TOOL = "waiting_for_tool"
     VERIFY = "verify"
+    APPROVAL = "approval"
     FINALIZE = "finalize"
 
 

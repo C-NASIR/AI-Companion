@@ -6,9 +6,11 @@ import json
 import logging
 import uuid
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel
 
 from .coordinator import RunCoordinator
 from .events import EventBus, EventStore, sse_event_stream
@@ -20,6 +22,7 @@ from .retrieval import InMemoryRetrievalStore, configure_retrieval_store
 from .schemas import ChatRequest, FeedbackRequest, iso_timestamp
 from .state import RunState
 from .state_store import StateStore
+from .workflow import ActivityContext, WorkflowEngine, WorkflowStore, build_activity_map
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -27,6 +30,7 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 FEEDBACK_FILE = DATA_DIR / "feedback.jsonl"
 EVENTS_DIR = DATA_DIR / "events"
 STATE_DIR = DATA_DIR / "state"
+WORKFLOW_DIR = DATA_DIR / "workflow"
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -39,9 +43,43 @@ configure_retrieval_store(RETRIEVAL_STORE)
 MCP_REGISTRY = MCPRegistry()
 PERMISSION_GATE = PermissionGate()
 MCP_CLIENT = MCPClient(MCP_REGISTRY)
-RUN_COORDINATOR = RunCoordinator(
-    EVENT_BUS, STATE_STORE, RETRIEVAL_STORE, MCP_REGISTRY, PERMISSION_GATE
+WORKFLOW_STORE = WorkflowStore(WORKFLOW_DIR)
+
+
+def _allowed_tools_provider(state: RunState):
+    context = PERMISSION_GATE.build_context(
+        user_role="human",
+        run_type=state.mode.value,
+    )
+    return PERMISSION_GATE.filter_allowed(
+        MCP_REGISTRY.list_tools(),
+        context,
+    )
+
+
+ACTIVITY_CONTEXT = ActivityContext(
+    EVENT_BUS,
+    STATE_STORE,
+    RETRIEVAL_STORE,
+    allowed_tools_provider=_allowed_tools_provider,
 )
+ACTIVITY_MAP = build_activity_map(ACTIVITY_CONTEXT)
+WORKFLOW_ENGINE = WorkflowEngine(
+    EVENT_BUS,
+    WORKFLOW_STORE,
+    STATE_STORE,
+    activities=ACTIVITY_MAP,
+)
+RUN_COORDINATOR = RunCoordinator(
+    EVENT_BUS,
+    STATE_STORE,
+    WORKFLOW_ENGINE,
+    ACTIVITY_CONTEXT,
+)
+
+
+class ApprovalRequest(BaseModel):
+    decision: Literal["approved", "rejected"]
 
 
 def _log(message: str, run_id: str, *args: object) -> None:
@@ -99,6 +137,25 @@ async def run_state(run_id: str) -> JSONResponse:
     if not state:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="run not found")
     return JSONResponse(state.model_dump())
+
+
+@router.get("/runs/{run_id}/workflow")
+async def run_workflow_state(run_id: str) -> JSONResponse:
+    """Return the persisted workflow state for the run."""
+    workflow_state = WORKFLOW_STORE.load(run_id)
+    if not workflow_state:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="workflow not found")
+    return JSONResponse(workflow_state.model_dump())
+
+
+@router.post("/runs/{run_id}/approval")
+async def run_approval_endpoint(run_id: str, payload: ApprovalRequest) -> JSONResponse:
+    """Record a human approval decision and resume the workflow."""
+    workflow_state = WORKFLOW_STORE.load(run_id)
+    if not workflow_state:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="workflow not found")
+    await WORKFLOW_ENGINE.record_human_decision(run_id, payload.decision)
+    return JSONResponse({"status": "recorded"})
 
 
 @router.post("/feedback")

@@ -171,8 +171,27 @@ All events are appended to `backend/data/events/<run_id>.jsonl`, so you can repl
 ## Inspecting the intelligence layer
 
 - The intelligence graph (`receive → plan → retrieve → respond → verify → finalize`) is defined explicitly in `backend/app/intelligence.py`. Each node emits its own lifecycle/status/decision/output events and persists the RunState snapshot upon completion. The retrieve node stores structured chunks on the RunState, respond streams model output with evidence instructions, and verify enforces grounding before the final outcome.
-- `backend/app/coordinator.py` listens to the event bus and advances the graph only after it observes the prior node’s completion event, ensuring the graph’s execution order is visible in the timeline.
+- `backend/app/coordinator.py` now bridges HTTP requests, tool events, and the workflow engine instead of running the graph directly. Every step transition is persisted in the workflow store and mirrored through `workflow.*` events so the execution order remains fully observable after restarts.
 - The frontend displays the current status, per-node progress, output chunks, and decision log entirely from the streamed events. No hidden client-side state machines exist.
+
+## Session 7 – Durable workflows
+
+Session 7 replaces the transient coordinator loop with a workflow engine that persists every transition under `backend/data/workflow/<run_id>.json`. The engine maps each intelligence node to an idempotent activity, enforces retry policies (`respond` and `retrieve` back off before exhausting attempts), pauses cleanly for human approval, and resumes from durable state after crashes or restarts. New workflow events (`workflow.step.started`, `workflow.retrying`, `workflow.waiting_for_event`, `workflow.waiting_for_approval`, etc.) show up in the event log and power the frontend’s workflow status card.
+
+### Crash-test durability
+
+1. Start the backend (`uvicorn app.main:app --reload` or `docker compose up`) and kick off a run that streams for a few seconds (e.g., a question that triggers retrieval/respond).
+2. Tail the workflow events: `tail -f backend/data/events/<run_id>.jsonl | rg workflow`.
+3. After you see `workflow.step.started` for `respond` or `retrieve`, kill the backend process (CTRL+C or `docker compose stop backend`).
+4. Restart the backend. On boot it reloads `RunState` + `WorkflowState`, observes pending steps, and emits `workflow.step.started` again without duplicating prior output/tool effects.
+5. Refresh the UI – it fetches `/runs/<run_id>/workflow` to rebuild the workflow summary, reconnects to SSE, and continues streaming from the resumed step.
+6. Repeat the test during tool execution or approval pauses to confirm retries, tool dedupe, and approvals all survive restarts.
+
+### Workflow + approval APIs
+
+- `GET /runs/{run_id}/workflow` returns the persisted workflow state (current step, attempts, pending events, approval flags) so you can inspect or debug a run outside the UI.
+- `POST /runs/{run_id}/approval` with `{"decision":"approved"}` or `{"decision":"rejected"}` records the human decision and causes the workflow engine to resume the paused step.
+- The frontend renders a dedicated Approval Gate with Approve / Reject buttons whenever the workflow emits `workflow.waiting_for_approval`.
 
 ## Validation checklist (Session 6)
 
