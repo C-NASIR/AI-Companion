@@ -1,4 +1,5 @@
 const DEFAULT_BACKEND_URL = "http://localhost:8000";
+const CONTAINER_HOSTNAMES = new Set(["backend", "frontend"]);
 
 export type ChatMode = "answer" | "research" | "summarize";
 
@@ -57,9 +58,32 @@ function normalizeUrl(url: string): string {
 export function getBackendUrl(): string {
   const envUrl = process.env.NEXT_PUBLIC_BACKEND_URL;
   if (envUrl && envUrl.trim().length > 0) {
-    return normalizeUrl(envUrl.trim());
+    const normalized = normalizeUrl(envUrl.trim());
+    return resolveContainerHost(normalized);
+  }
+  if (typeof window !== "undefined") {
+    return `${window.location.protocol}//${window.location.hostname}:8000`;
   }
   return DEFAULT_BACKEND_URL;
+}
+
+function resolveContainerHost(url: string): string {
+  if (typeof window === "undefined") {
+    return url;
+  }
+  try {
+    const parsed = new URL(url);
+    if (CONTAINER_HOSTNAMES.has(parsed.hostname)) {
+      parsed.hostname = window.location.hostname;
+      if (!parsed.port) {
+        parsed.port = "8000";
+      }
+      return normalizeUrl(parsed.toString());
+    }
+    return url;
+  } catch {
+    return url;
+  }
 }
 
 export async function startRunRequest(
