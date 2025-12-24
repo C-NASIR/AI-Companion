@@ -71,6 +71,8 @@ async def real_stream(
     mode: ChatMode,
     run_id: str,
     retrieved_chunks: Sequence[Mapping[str, object] | object],
+    *,
+    is_evaluation: bool = False,
 ) -> AsyncGenerator[str, None]:
     """Stream completion chunks from OpenAI."""
     client = _get_client()
@@ -97,11 +99,15 @@ async def real_stream(
             }
         )
     messages.append({"role": "user", "content": message})
-    stream = await client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=messages,
-        stream=True,
-    )
+    completion_kwargs: dict[str, object] = {
+        "model": OPENAI_MODEL,
+        "messages": messages,
+        "stream": True,
+    }
+    if is_evaluation:
+        completion_kwargs["temperature"] = 0
+        completion_kwargs["top_p"] = 1
+    stream = await client.chat.completions.create(**completion_kwargs)
     async for event in stream:
         choice = event.choices[0]
         delta = choice.delta
@@ -123,6 +129,8 @@ async def fake_stream(
     mode: ChatMode,
     run_id: str,
     retrieved_chunks: Sequence[Mapping[str, object] | object],
+    *,
+    is_evaluation: bool = False,
 ) -> AsyncGenerator[str, None]:
     """Local deterministic stream when OpenAI credentials are unavailable."""
     snippet = (message.strip() or "…")[:60]
@@ -136,7 +144,7 @@ async def fake_stream(
             evidence_sentences.append(f"[{chunk_id}] {snippet_text}")
         answer_body = " ".join(evidence_sentences)
         chunks = [
-            f"[fake:{run_id}] Mode={mode.value}. ",
+            f"(fake:{run_id}) Mode={mode.value}. ",
             "Grounded response using retrieved evidence. ",
             "User message snippet: ",
             snippet,
@@ -149,7 +157,7 @@ async def fake_stream(
         ]
     else:
         chunks = [
-            f"[fake:{run_id}] Mode={mode.value}. ",
+            f"(fake:{run_id}) Mode={mode.value}. ",
             "No evidence chunks were retrieved. ",
             'I lack sufficient evidence to answer.',
             " Replace OPENAI_API_KEY to enable live streaming.",
@@ -165,12 +173,28 @@ async def stream_chat(
     mode: ChatMode,
     run_id: str,
     retrieved_chunks: Sequence[Mapping[str, object] | object] | None = None,
+    *,
+    is_evaluation: bool = False,
 ) -> AsyncIterator[str]:
     """Dispatch to real or fake streamer."""
     evidence = retrieved_chunks or []
     if OPENAI_API_KEY:
-        async for chunk in real_stream(message, context, mode, run_id, evidence):
+        async for chunk in real_stream(
+            message,
+            context,
+            mode,
+            run_id,
+            evidence,
+            is_evaluation=is_evaluation,
+        ):
             yield chunk
     else:
-        async for chunk in fake_stream(message, context, mode, run_id, evidence):
+        async for chunk in fake_stream(
+            message,
+            context,
+            mode,
+            run_id,
+            evidence,
+            is_evaluation=is_evaluation,
+        ):
             yield chunk

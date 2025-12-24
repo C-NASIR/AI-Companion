@@ -16,6 +16,7 @@ class PermissionContext:
     user_role: str
     environment: str
     run_type: str
+    is_evaluation: bool = False
 
 
 class PermissionGate:
@@ -24,11 +25,14 @@ class PermissionGate:
     def __init__(self, environment: str | None = None):
         self.environment = environment or os.getenv("APP_ENV", "development")
 
-    def build_context(self, *, user_role: str, run_type: str) -> PermissionContext:
+    def build_context(
+        self, *, user_role: str, run_type: str, is_evaluation: bool = False
+    ) -> PermissionContext:
         return PermissionContext(
             user_role=user_role,
             environment=self.environment,
             run_type=run_type,
+            is_evaluation=is_evaluation,
         )
 
     def is_allowed(

@@ -58,6 +58,7 @@ def _allowed_tools_provider(state: RunState):
     context = PERMISSION_GATE.build_context(
         user_role="human",
         run_type=state.mode.value,
+        is_evaluation=state.is_evaluation,
     )
     return PERMISSION_GATE.filter_allowed(
         MCP_REGISTRY.list_tools(),

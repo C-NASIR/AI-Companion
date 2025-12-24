@@ -23,6 +23,7 @@ async def _stream_direct_answer(
         state.mode,
         state.run_id,
         retrieved_chunks,
+        is_evaluation=state.is_evaluation,
     ):
         if first_chunk:
             await ctx.emit_status(state, "responding")

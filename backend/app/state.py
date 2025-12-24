@@ -95,6 +95,7 @@ class RunState(BaseModel):
     message: str
     context: str | None = None
     mode: ChatMode
+    is_evaluation: bool = False
     phase: RunPhase = Field(default=RunPhase.INIT)
     plan_type: PlanType | None = None
     verification_passed: bool | None = None
@@ -123,6 +124,7 @@ class RunState(BaseModel):
         message: str,
         context: str | None,
         mode: ChatMode,
+        is_evaluation: bool = False,
     ) -> "RunState":
         """Create a new RunState instance with synchronized timestamps."""
         ts = iso_timestamp()
@@ -131,6 +133,7 @@ class RunState(BaseModel):
             message=message,
             context=context,
             mode=mode,
+            is_evaluation=is_evaluation,
             phase=RunPhase.INIT,
             created_at=ts,
             updated_at=ts,

@@ -46,7 +46,11 @@ async def _gather_response_text(
             "model.openai_chat",
             "model",
             parent_span_id=parent_span_id,
-            attributes={"model": OPENAI_MODEL, "mode": state.mode.value},
+            attributes={
+                "model": OPENAI_MODEL,
+                "mode": state.mode.value,
+                "is_evaluation": state.is_evaluation,
+            },
         )
     try:
         async for chunk in stream_chat(
@@ -55,6 +59,7 @@ async def _gather_response_text(
             state.mode,
             run_id,
             retrieved_chunks,
+            is_evaluation=state.is_evaluation,
         ):
             chunks.append(chunk)
     except Exception as exc:

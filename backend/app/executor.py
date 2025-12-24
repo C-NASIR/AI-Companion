@@ -300,7 +300,12 @@ class ToolExecutor:
     def _permission_context_for_run(self, run_id: str):
         state = self.state_store.load(run_id)
         run_type = state.mode.value if state else "answer"
-        return self.permission_gate.build_context(user_role="human", run_type=run_type)
+        is_evaluation = bool(state.is_evaluation) if state else False
+        return self.permission_gate.build_context(
+            user_role="human",
+            run_type=run_type,
+            is_evaluation=is_evaluation,
+        )
 
     @staticmethod
     def _duration_ms(start: float) -> int:

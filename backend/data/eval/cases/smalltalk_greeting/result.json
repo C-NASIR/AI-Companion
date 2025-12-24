@@ -1,0 +1,31 @@
+{
+  "case": {
+    "id": "smalltalk_greeting",
+    "description": "Simple greeting should not trigger retrieval or citations.",
+    "expectations": {
+      "outcome": "success",
+      "requires_retrieval": false,
+      "requires_tool": null,
+      "forbidden_tool": null,
+      "requires_citations": false,
+      "max_tool_calls": 0,
+      "verification_should_fail": false,
+      "notes": "Respond politely without citing docs."
+    }
+  },
+  "result": {
+    "case_id": "smalltalk_greeting",
+    "run_id": "eval-smalltalk_greeting-e3b61d08",
+    "event_type": "run.completed",
+    "finished_ts": "2025-12-24T23:44:06.251256+00:00",
+    "duration_seconds": 1.5640699160285294,
+    "outcome": "success",
+    "verification_passed": true,
+    "verification_reason": null,
+    "final_text": "(fake:eval-smalltalk_greeting-e3b61d08) Mode=answer. Grounded response using retrieved evidence. User message snippet: Just say hello to the team.. Context snippet: none provided. [ai_operating_systems.md::002] logs chunk identifiers, metadata, and similarity scores, reviewers can inspect whether an answer truly relied on trustwo [futures_playbook.md::000] # Futures Playbook  Preparing for the future is not an annual workshop\u2014it is a continuous discipline. Scenario planning  [what_is_strategy.md::001] structure at General Motors exemplified modern strategy: decide where to play, how to win, and which trade-offs to embra Replace OPENAI_API_KEY to enable live streaming.",
+    "state_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/state/eval-smalltalk_greeting-e3b61d08.json",
+    "events_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/events/eval-smalltalk_greeting-e3b61d08.jsonl",
+    "trace_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/traces/eval-smalltalk_greeting-e3b61d08.json",
+    "notes": "Respond politely without citing docs."
+  }
+}

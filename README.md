@@ -9,6 +9,8 @@ Session 6 keeps the event-driven backbone and knowledge foundation from earlier 
 - `backend/data/events` – JSONL event logs (one file per `run_id`, created automatically).
 - `backend/data/state` – `RunState` snapshots persisted after every node.
 - `backend/data/traces` – Session 8 trace files (`{run_id}.json`) with the trace envelope plus every span.
+- `backend/app/eval` – Session 9 evaluation scaffolding (dataset, runner, scorers, report, gate, CLI) that replays full intelligence runs deterministically.
+- `backend/data/eval` – Reserved for evaluation artifacts (latest `report.json`, per-case trajectory exports) consumed by CI and local developers.
 - `infra/compose.yaml` – Docker Compose stack. The backend bind-mounts `backend/data` into `/app/data`, and its entrypoint wipes that directory on container start and shutdown so you see live files locally without persisting them between runs.
 - `docs/` – Project overview, per-session prompts, and the Session 5 implementation plan.
 - `backend/data/docs` – Authoritative markdown corpus that ingestion reads on startup. Stable filenames become `document_id` values inside chunk metadata.
@@ -250,3 +252,33 @@ Error types follow the Session 8 classification (e.g., `network_failure`, `bad_p
 13. **External execution** – Provide a valid `GITHUB_TOKEN`, rerun the same request, and confirm `tool.executed` completes successfully, `tool.server.error` never fires, and the tool panel shows `source=external` with scope `github.read`. Disable the GitHub server in `backend/app/main.py` (comment out `GitHubMCPServer`) and verify no intelligence changes are required—the planner simply lists fewer discovered tools.
 
 See `docs/session_3_plan.md` and `docs/session_4_plan.md` for the implementation details and follow-up notes.
+
+## Evaluation suite (Session 9)
+
+Run the deterministic evaluation layer to guard against regressions:
+
+```bash
+cd backend
+python3 -m app.eval.run
+```
+
+Key behavior:
+
+- Replays every case in `backend/app/eval/dataset.yaml` through the real workflow with `is_evaluation=true`.
+- Streams per-case results to the console, writes machine-readable output to `backend/data/eval/report.json`, and exits non-zero if any scorer fails.
+- `--case <id>` runs a subset of cases, `--timeout <seconds>` overrides per-case timeout, and `--allow-failures <n>` sets a temporary tolerance (default `0`).
+
+**Interpreting failures**
+
+1. Read the console report or inspect `backend/data/eval/report.json` to see which case/scorer failed.
+2. Use the referenced run id to open `backend/data/events/<run_id>.jsonl`, `backend/data/state/<run_id>.json`, or `backend/data/traces/<run_id>.json` for deeper debugging.
+3. Fix the responsible layer (planning, retrieval, execution, verification) rather than weakening expectations—evaluation is your regression safety net.
+
+**Adding cases**
+
+- Edit `backend/app/eval/dataset.yaml`. Every case needs a stable `id`, descriptive notes, and concrete expectations (retrieval/tool requirements, citation rules, verification behavior).
+- Keep the dataset deterministic and grounded in real scenarios; 30–60 cases is the target range enforced by the dataset loader.
+
+**Quarantining failures**
+
+- Only as a last resort, temporarily set `--allow-failures 1` when invoking the CLI and leave an inline comment documenting why the failure is tolerated. Never silently skip cases; the CI workflow should make quarantines visible.

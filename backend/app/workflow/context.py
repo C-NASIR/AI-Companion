@@ -101,7 +101,11 @@ class ActivityContext:
                 f"intelligence.{name}",
                 "intelligence",
                 parent_span_id=self._workflow_spans.get(run_id),
-                attributes={"node": name, "phase": phase.value},
+                attributes={
+                    "node": name,
+                    "phase": phase.value,
+                    "is_evaluation": state.is_evaluation,
+                },
             )
             self._node_spans[run_id] = span_id
         await self.emit_event(state, "node.started", {"name": name})

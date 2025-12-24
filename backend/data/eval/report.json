@@ -1,0 +1,71 @@
+{
+  "success": true,
+  "cases": [
+    {
+      "case_id": "smalltalk_greeting",
+      "run_id": "eval-smalltalk_greeting-e3b61d08",
+      "outcome": "success",
+      "verification_passed": true,
+      "passed": true,
+      "scorers": [
+        {
+          "name": "outcome",
+          "passed": true,
+          "details": "outcome=success"
+        },
+        {
+          "name": "retrieval",
+          "passed": true,
+          "details": "retrieval_performed=True chunks=3"
+        },
+        {
+          "name": "tool_usage",
+          "passed": true,
+          "details": "tool_calls=0 names=['none']"
+        },
+        {
+          "name": "grounding",
+          "passed": true,
+          "details": "citations_present=True"
+        },
+        {
+          "name": "verification",
+          "passed": true,
+          "details": "verification_passed=true"
+        }
+      ]
+    }
+  ],
+  "scorers": [
+    {
+      "name": "outcome",
+      "passed": 1,
+      "failed": 0,
+      "pass_rate": 1.0
+    },
+    {
+      "name": "retrieval",
+      "passed": 1,
+      "failed": 0,
+      "pass_rate": 1.0
+    },
+    {
+      "name": "tool_usage",
+      "passed": 1,
+      "failed": 0,
+      "pass_rate": 1.0
+    },
+    {
+      "name": "grounding",
+      "passed": 1,
+      "failed": 0,
+      "pass_rate": 1.0
+    },
+    {
+      "name": "verification",
+      "passed": 1,
+      "failed": 0,
+      "pass_rate": 1.0
+    }
+  ]
+}
