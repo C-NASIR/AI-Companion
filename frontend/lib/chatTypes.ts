@@ -26,3 +26,32 @@ export interface ToolContextState {
   toolDeniedReason: string | null;
   lastToolStatus: string | null;
 }
+
+export interface GuardrailSummaryState {
+  status: string;
+  reason: string | null;
+  layer: string | null;
+  threatType: string | null;
+}
+
+export interface GuardrailEventEntry {
+  ts: string;
+  layer: string;
+  threatType: string;
+  notes: string | null;
+  confidence: string | null;
+}
+
+export interface SanitizedContextEntry {
+  ts: string;
+  chunkId: string;
+  applied: boolean;
+  notes: string | null;
+}
+
+export interface InjectionSignalEntry {
+  ts: string;
+  location: string;
+  pattern: string | null;
+  confidence: string | null;
+}

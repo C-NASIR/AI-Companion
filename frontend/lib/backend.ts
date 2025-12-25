@@ -29,7 +29,10 @@ export type RunEventType =
   | "workflow.waiting_for_approval"
   | "workflow.approval.recorded"
   | "workflow.completed"
-  | "workflow.failed";
+  | "workflow.failed"
+  | "guardrail.triggered"
+  | "context.sanitized"
+  | "injection.detected";
 
 export interface RunEvent {
   id: string;
@@ -200,6 +203,12 @@ export interface RunStatePayload {
   tool_permission_scope?: string | null;
   tool_denied_reason?: string | null;
   last_tool_status?: string | null;
+  sanitized_chunk_ids?: string[];
+  guardrail_status?: string | null;
+  guardrail_reason?: string | null;
+  guardrail_layer?: string | null;
+  guardrail_threat_type?: string | null;
+  updated_at?: string | null;
 }
 
 export interface WorkflowStatePayload {

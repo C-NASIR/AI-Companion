@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Mapping, Sequence
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .schemas import ChatMode, iso_timestamp
 
@@ -115,6 +115,20 @@ class RunState(BaseModel):
     tool_permission_scope: str | None = None
     tool_denied_reason: str | None = None
     retrieved_chunks: list["RetrievedChunkRecord"] = Field(default_factory=list)
+    sanitized_chunk_ids: list[str] = Field(default_factory=list)
+    guardrail_status: str | None = None
+    guardrail_reason: str | None = None
+    guardrail_layer: str | None = None
+    guardrail_threat_type: str | None = None
+
+    @field_validator("run_id")
+    @classmethod
+    def _validate_run_id(cls, value: str) -> str:
+        """Ensure every run has a stable identifier for logging."""
+        normalized = (value or "").strip()
+        if not normalized:
+            raise ValueError("run_id must be a non-empty string")
+        return normalized
 
     @classmethod
     def new(
@@ -142,6 +156,10 @@ class RunState(BaseModel):
     def _touch(self) -> None:
         """Refresh updated_at timestamp."""
         self.updated_at = iso_timestamp()
+
+    def log_extra(self) -> dict[str, str]:
+        """Return a logging extra payload that enforces run_id tagging."""
+        return {"run_id": self.run_id}
 
     def transition_phase(self, new_phase: RunPhase) -> None:
         """Move the run into a new phase."""
@@ -308,6 +326,29 @@ class RunState(BaseModel):
                 )
             )
         self.retrieved_chunks = normalized
+        self._touch()
+
+    def record_sanitized_chunk(self, chunk_id: str) -> None:
+        """Track sanitized retrieval chunks."""
+        if not chunk_id:
+            return
+        if chunk_id not in self.sanitized_chunk_ids:
+            self.sanitized_chunk_ids.append(chunk_id)
+            self._touch()
+
+    def set_guardrail_status(
+        self,
+        status: str,
+        *,
+        reason: str | None = None,
+        layer: str | None = None,
+        threat_type: str | None = None,
+    ) -> None:
+        """Persist guardrail status metadata for observability/UI."""
+        self.guardrail_status = status
+        self.guardrail_reason = reason
+        self.guardrail_layer = layer
+        self.guardrail_threat_type = threat_type
         self._touch()
 
 

@@ -6,8 +6,13 @@ from contextlib import asynccontextmanager
 from typing import Callable, Mapping, Sequence
 
 from ..events import EventBus, new_event
+from ..guardrails.base import GuardrailViolation
+from ..guardrails.context_sanitizer import ContextSanitizer
+from ..guardrails.injection_detector import InjectionDetector
+from ..guardrails.output_validator import OutputValidator
+from ..guardrails.refusal import apply_refusal
 from ..mcp.schema import ToolDescriptor
-from ..retrieval import RetrievalStore
+from ..retrieval import RetrievedChunk, RetrievalStore
 from ..state import RunPhase, RunState
 from ..state_store import StateStore
 from ..observability.tracer import Tracer
@@ -25,6 +30,10 @@ class ActivityContext:
         allowed_tools_provider: Callable[[RunState], Sequence[ToolDescriptor]]
         | None = None,
         tracer: Tracer | None = None,
+        *,
+        context_sanitizer: ContextSanitizer | None = None,
+        output_validator: OutputValidator | None = None,
+        injection_detector: InjectionDetector | None = None,
     ):
         self.bus = bus
         self.state_store = state_store
@@ -33,6 +42,9 @@ class ActivityContext:
         self.tracer = tracer
         self._workflow_spans: dict[str, str] = {}
         self._node_spans: dict[str, str] = {}
+        self.context_sanitizer = context_sanitizer
+        self.output_validator = output_validator
+        self.injection_detector = injection_detector
 
     async def emit_event(self, state: RunState, event_type: str, data: Mapping[str, object]) -> None:
         """Publish an event with run metadata."""
@@ -141,6 +153,66 @@ class ActivityContext:
                         self.tracer.add_span_attribute(run_id, span_id, "error_type", err_type)
                 self.tracer.end_span(run_id, span_id, status, error_payload)
             self._node_spans.pop(run_id, None)
+
+    async def sanitize_chunks(
+        self, state: RunState, chunks: Sequence[RetrievedChunk]
+    ) -> Sequence[RetrievedChunk]:
+        """Apply context sanitization and detection before storing chunks."""
+        if not chunks:
+            return chunks
+        sanitized: list[RetrievedChunk] = []
+        for chunk in chunks:
+            text = chunk.text or ""
+            if self.injection_detector:
+                await self.injection_detector.scan(state.run_id, text, "retrieval")
+            if not self.context_sanitizer:
+                sanitized.append(chunk)
+                continue
+            cleaned = await self.context_sanitizer.sanitize_chunk(
+                state.run_id,
+                chunk.chunk_id,
+                text,
+            )
+            if cleaned != text:
+                state.record_sanitized_chunk(chunk.chunk_id)
+            sanitized.append(
+                RetrievedChunk(
+                    chunk_id=chunk.chunk_id,
+                    document_id=chunk.document_id,
+                    text=cleaned,
+                    metadata=chunk.metadata,
+                    score=chunk.score,
+                )
+            )
+        return sanitized
+
+    async def ensure_output_safe(
+        self,
+        state: RunState,
+        *,
+        detect_injection: bool = True,
+        enforce_citations: bool = True,
+    ) -> None:
+        """Run injection detection and output validation before streaming."""
+        payload = state.output_text or ""
+        if detect_injection and self.injection_detector:
+            await self.injection_detector.scan(state.run_id, payload, "output")
+        if not self.output_validator:
+            return
+        try:
+            await self.output_validator.validate(
+                state,
+                enforce_citations=enforce_citations,
+            )
+        except GuardrailViolation as violation:
+            state.set_guardrail_status(
+                "guardrail_triggered",
+                reason=violation.assessment.notes or violation.assessment.threat_type.value,
+                layer=violation.layer,
+                threat_type=violation.assessment.threat_type.value,
+            )
+            apply_refusal(state, reason=violation.assessment.threat_type.value)
+            raise
 
 
 def _error_type_for_phase(phase: RunPhase) -> str:

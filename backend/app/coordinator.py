@@ -6,6 +6,10 @@ import logging
 from typing import Mapping
 
 from .events import Event, EventBus, new_event
+from .guardrails.base import GuardrailViolation
+from .guardrails.input_gate import InputGate
+from .guardrails.injection_detector import InjectionDetector
+from .guardrails.refusal import apply_refusal
 from .state import RunState
 from .state_store import StateStore
 from .observability.tracer import Tracer
@@ -24,12 +28,17 @@ class RunCoordinator:
         workflow_engine: WorkflowEngine,
         activity_ctx: ActivityContext,
         tracer: Tracer | None = None,
+        *,
+        input_gate: InputGate | None = None,
+        injection_detector: InjectionDetector | None = None,
     ):
         self.bus = bus
         self.state_store = state_store
         self.workflow_engine = workflow_engine
         self.activity_ctx = activity_ctx
         self.tracer = tracer
+        self.input_gate = input_gate
+        self.injection_detector = injection_detector
         self._unsubscribe = self.bus.subscribe_all(self._handle_event)
 
     async def start_run(self, state: RunState) -> None:
@@ -37,6 +46,14 @@ class RunCoordinator:
         run_id = state.run_id
         if self.tracer:
             self.tracer.start_trace(run_id)
+        try:
+            if self.injection_detector:
+                await self.injection_detector.scan(run_id, state.message, "input")
+            if self.input_gate:
+                await self.input_gate.enforce(run_id, state.message, state.mode)
+        except GuardrailViolation as violation:
+            await self._handle_guardrail_refusal(state, violation)
+            return
         self.state_store.save(state)
         await self.bus.publish(
             new_event(
@@ -128,6 +145,38 @@ class RunCoordinator:
             )
         self.activity_ctx.save_state(state)
         await self.workflow_engine.handle_event(event)
+
+    async def _handle_guardrail_refusal(
+        self,
+        state: RunState,
+        violation: GuardrailViolation,
+    ) -> None:
+        """Handle guardrail-triggered refusals before workflow start."""
+        run_id = state.run_id
+        reason = violation.assessment.notes or violation.assessment.threat_type.value
+        state.set_guardrail_status(
+            "refused",
+            reason=reason,
+            layer=violation.layer,
+            threat_type=violation.assessment.threat_type.value,
+        )
+        apply_refusal(state, reason=reason)
+        self.state_store.save(state)
+        await self.bus.publish(
+            new_event(
+                "run.failed",
+                run_id,
+                {"reason": reason, "final_text": state.output_text},
+            )
+        )
+        if self.tracer:
+            self.tracer.complete_trace(run_id, "failed")
+        logger.warning(
+            "run refused by guardrail layer=%s reason=%s",
+            violation.layer,
+            reason,
+            extra={"run_id": run_id},
+        )
 
     @staticmethod
     def _coerce_mapping(value: object, default: Mapping[str, object] | None = None) -> Mapping[str, object]:

@@ -14,6 +14,10 @@ from pydantic import BaseModel
 
 from .coordinator import RunCoordinator
 from .events import EventBus, EventStore, sse_event_stream
+from .guardrails.context_sanitizer import ContextSanitizer
+from .guardrails.input_gate import InputGate
+from .guardrails.injection_detector import InjectionDetector
+from .guardrails.output_validator import OutputValidator
 from .ingestion import EmbeddingGenerator
 from .mcp.client import MCPClient
 from .mcp.registry import MCPRegistry
@@ -22,9 +26,11 @@ from .retrieval import InMemoryRetrievalStore, configure_retrieval_store
 from .schemas import ChatRequest, FeedbackRequest, iso_timestamp
 from .state import RunState
 from .state_store import StateStore
+from .observability.guardrail_monitor import GuardrailMonitor
 from .observability.store import TraceStore
 from .observability.tracer import Tracer
 from .observability.api import configure_trace_api, router as observability_router
+from .settings import settings
 from .workflow import ActivityContext, WorkflowEngine, WorkflowStore, build_activity_map
 
 router = APIRouter()
@@ -52,6 +58,42 @@ TRACE_STORE = TraceStore(TRACE_DIR)
 TRACER = Tracer(TRACE_STORE)
 configure_trace_api(TRACE_STORE)
 router.include_router(observability_router)
+INPUT_GATE = (
+    InputGate(EVENT_BUS) if settings.guardrails.input_gate_enabled else None
+)
+CONTEXT_SANITIZER = (
+    ContextSanitizer(EVENT_BUS)
+    if settings.guardrails.context_sanitizer_enabled
+    else None
+)
+OUTPUT_VALIDATOR = (
+    OutputValidator(EVENT_BUS)
+    if settings.guardrails.output_validator_enabled
+    else None
+)
+INJECTION_DETECTOR = (
+    InjectionDetector(EVENT_BUS)
+    if settings.guardrails.injection_detector_enabled
+    else None
+)
+GUARDRAIL_MONITOR = GuardrailMonitor(
+    EVENT_BUS, report_interval=settings.guardrails.monitor_report_seconds
+)
+_disabled_layers: list[str] = []
+if INPUT_GATE is None:
+    _disabled_layers.append("input")
+if CONTEXT_SANITIZER is None:
+    _disabled_layers.append("context")
+if OUTPUT_VALIDATOR is None:
+    _disabled_layers.append("output")
+if INJECTION_DETECTOR is None:
+    _disabled_layers.append("injection")
+if settings.guardrails.tool_firewall_enabled is False:
+    _disabled_layers.append("tool_firewall")
+if _disabled_layers:
+    logger.warning(
+        "guardrail layers disabled=%s", ",".join(_disabled_layers), extra={"run_id": "system"}
+    )
 
 
 def _allowed_tools_provider(state: RunState):
@@ -72,6 +114,9 @@ ACTIVITY_CONTEXT = ActivityContext(
     RETRIEVAL_STORE,
     allowed_tools_provider=_allowed_tools_provider,
     tracer=TRACER,
+    context_sanitizer=CONTEXT_SANITIZER,
+    output_validator=OUTPUT_VALIDATOR,
+    injection_detector=INJECTION_DETECTOR,
 )
 ACTIVITY_MAP = build_activity_map(ACTIVITY_CONTEXT)
 WORKFLOW_ENGINE = WorkflowEngine(
@@ -88,6 +133,8 @@ RUN_COORDINATOR = RunCoordinator(
     WORKFLOW_ENGINE,
     ACTIVITY_CONTEXT,
     TRACER,
+    input_gate=INPUT_GATE,
+    injection_detector=INJECTION_DETECTOR,
 )
 
 

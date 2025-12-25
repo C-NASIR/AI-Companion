@@ -6,6 +6,7 @@ import ApprovalGate from "../components/ApprovalGate";
 import ChatForm from "../components/ChatForm";
 import FeedbackPanel from "../components/FeedbackPanel";
 import ResponsePanel from "../components/ResponsePanel";
+import SafetyPanel from "../components/SafetyPanel";
 import StatusCard from "../components/StatusCard";
 import StepsPanel from "../components/StepsPanel";
 import { useChatRun } from "../hooks/useChatRun";
@@ -58,17 +59,29 @@ export default function HomePage() {
           onReject={() => chatRun.handleApprovalDecision("rejected")}
         />
         <div className="flex flex-col gap-4 md:flex-row">
-          <ResponsePanel
-            output={chatRun.output}
-            finalText={chatRun.finalText}
-            decisions={chatRun.decisions}
-            retrievedChunks={chatRun.retrievedChunks}
-            retrievalAttempted={chatRun.retrievalAttempted}
-            runComplete={chatRun.runComplete}
-            availableTools={chatRun.availableTools}
-            toolContext={chatRun.toolContext}
-          />
-          <StepsPanel steps={chatRun.orderedSteps} />
+          <div className="md:flex-[2]">
+            <ResponsePanel
+              output={chatRun.output}
+              finalText={chatRun.finalText}
+              decisions={chatRun.decisions}
+              retrievedChunks={chatRun.retrievedChunks}
+              retrievalAttempted={chatRun.retrievalAttempted}
+              runComplete={chatRun.runComplete}
+              availableTools={chatRun.availableTools}
+              toolContext={chatRun.toolContext}
+            />
+          </div>
+          <div className="flex flex-1 flex-col gap-4 md:w-1/3">
+            <StepsPanel steps={chatRun.orderedSteps} />
+            <SafetyPanel
+              guardrailSummary={chatRun.guardrailSummary}
+              guardrailEvents={chatRun.guardrailEvents}
+              sanitizedContext={chatRun.sanitizedContext}
+              injectionSignals={chatRun.injectionSignals}
+              retrievedChunks={chatRun.retrievedChunks}
+              toolDeniedReason={chatRun.toolContext.toolDeniedReason}
+            />
+          </div>
         </div>
         {chatRun.runError ? (
           <div className="rounded-xl border border-rose-900/40 bg-rose-950/40 p-4 text-sm text-rose-100">

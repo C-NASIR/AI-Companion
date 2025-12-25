@@ -30,7 +30,11 @@ import {
 import type {
   AvailableToolEntry,
   DecisionEntry,
+  GuardrailEventEntry,
+  GuardrailSummaryState,
+  InjectionSignalEntry,
   RetrievedChunkEntry,
+  SanitizedContextEntry,
   ToolContextState,
 } from "../lib/chatTypes";
 
@@ -275,6 +279,17 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
   const [isSubmittingApproval, setIsSubmittingApproval] = useState(false);
   const [approvalError, setApprovalError] = useState<string | null>(null);
   const [spanAlerts, setSpanAlerts] = useState<SpanAlert[]>([]);
+  const [guardrailSummary, setGuardrailSummary] =
+    useState<GuardrailSummaryState | null>(null);
+  const [guardrailEvents, setGuardrailEvents] = useState<GuardrailEventEntry[]>(
+    []
+  );
+  const [sanitizedContext, setSanitizedContext] = useState<
+    SanitizedContextEntry[]
+  >([]);
+  const [injectionSignals, setInjectionSignals] = useState<
+    InjectionSignalEntry[]
+  >([]);
 
   const [formError, setFormError] = useState<string | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
@@ -288,6 +303,22 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
   const outputRef = useRef("");
 
   const statusDisplay: StatusDisplay = useMemo(() => {
+    if (guardrailSummary?.status === "refused") {
+      return {
+        label: "Request refused",
+        hint:
+          guardrailSummary.reason ??
+          "Guardrails refused this request before it started.",
+      };
+    }
+    if (guardrailSummary?.status === "guardrail_triggered") {
+      return {
+        label: "Guardrail triggered",
+        hint:
+          guardrailSummary.reason ??
+          `Execution stopped at the ${guardrailSummary.layer ?? "safety"} layer.`,
+      };
+    }
     if (spanAlerts.length > 0) {
       return {
         label: spanAlerts[0]?.title,
@@ -342,11 +373,12 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
         hint: "Awaiting your intent. Submit a message to begin a run.",
       };
     }
-    return {
-      label: STATUS_LABELS[statusValue],
-      hint: STATUS_HINTS[statusValue],
-    };
+  return {
+    label: STATUS_LABELS[statusValue],
+    hint: STATUS_HINTS[statusValue],
+  };
   }, [
+    guardrailSummary,
     approvalPending,
     retrievalPending,
     spanAlerts,
@@ -414,6 +446,10 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
     setApprovalDecision(null);
     setApprovalError(null);
     setSpanAlerts([]);
+    setGuardrailSummary(null);
+    setGuardrailEvents([]);
+    setSanitizedContext([]);
+    setInjectionSignals([]);
     lastSeqRef.current = 0;
   }, []);
 
@@ -454,6 +490,76 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
     lastSeqRef.current = event.seq;
 
     switch (event.type) {
+      case "guardrail.triggered": {
+        const layer =
+          typeof event.data?.layer === "string" ? event.data.layer : "unknown";
+        const threatType =
+          typeof event.data?.threat_type === "string"
+            ? event.data.threat_type
+            : "unknown";
+        const notes =
+          typeof event.data?.notes === "string" ? event.data.notes : null;
+        const confidence =
+          typeof event.data?.confidence === "string"
+            ? event.data.confidence
+            : null;
+        setGuardrailEvents((prev) => [
+          ...prev,
+          {
+            ts: event.ts,
+            layer,
+            threatType,
+            notes,
+            confidence,
+          },
+        ]);
+        setGuardrailSummary({
+          status: "guardrail_triggered",
+          reason: notes,
+          layer,
+          threatType,
+        });
+        break;
+      }
+
+      case "context.sanitized": {
+        const chunkId =
+          typeof event.data?.original_chunk_id === "string"
+            ? event.data.original_chunk_id
+            : "unknown";
+        const applied = Boolean(event.data?.sanitization_applied);
+        const notes =
+          typeof event.data?.notes === "string" ? event.data.notes : null;
+        setSanitizedContext((prev) => [
+          ...prev,
+          {
+            ts: event.ts,
+            chunkId,
+            applied,
+            notes,
+          },
+        ]);
+        break;
+      }
+
+      case "injection.detected": {
+        const location =
+          typeof event.data?.location === "string"
+            ? event.data.location
+            : "unknown";
+        const pattern =
+          typeof event.data?.pattern === "string" ? event.data.pattern : null;
+        const confidence =
+          typeof event.data?.confidence === "string"
+            ? event.data.confidence
+            : null;
+        setInjectionSignals((prev) => [
+          ...prev,
+          { ts: event.ts, location, pattern, confidence },
+        ]);
+        break;
+      }
+
       case "status.changed": {
         const value = event.data?.value;
         if (isStatusValue(value)) {
@@ -873,6 +979,32 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
             ...prev,
             ...resolvedToolContext,
           }));
+          if (Array.isArray(payload.sanitized_chunk_ids)) {
+            const fallbackTs =
+              (typeof payload.updated_at === "string" && payload.updated_at) ||
+              new Date().toISOString();
+            setSanitizedContext((prev) => {
+              const existingIds = new Set(prev.map((entry) => entry.chunkId));
+              const additions = (payload.sanitized_chunk_ids ?? [])
+                .filter((id): id is string => typeof id === "string")
+                .filter((id) => !existingIds.has(id))
+                .map((id) => ({
+                  ts: fallbackTs,
+                  chunkId: id,
+                  applied: true,
+                  notes: null,
+                }));
+              return additions.length ? [...prev, ...additions] : prev;
+            });
+          }
+          if (typeof payload.guardrail_status === "string") {
+            setGuardrailSummary({
+              status: payload.guardrail_status,
+              reason: payload.guardrail_reason ?? null,
+              layer: payload.guardrail_layer ?? null,
+              threatType: payload.guardrail_threat_type ?? null,
+            });
+          }
         }
       })
       .catch(() => {
@@ -1062,6 +1194,10 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
     runOutcomeReason,
     statusDisplay,
     spanAlerts,
+    guardrailSummary,
+    guardrailEvents,
+    sanitizedContext,
+    injectionSignals,
     retrievedChunks,
     retrievalAttempted,
     availableTools,

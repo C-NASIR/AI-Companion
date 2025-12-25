@@ -7,13 +7,14 @@ import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Literal, Mapping, Sequence
 from uuid import uuid4
 import threading
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .schemas import iso_timestamp
+from .guardrails.threats import ThreatAssessment, ThreatConfidence
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +100,37 @@ class ToolServerErrorPayload(BaseModel):
 
     server_id: str
     error: dict[str, Any]
+
+
+class GuardrailTriggeredPayload(BaseModel):
+    """Data stored when a guardrail prevents a harmful action."""
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=True)
+
+    layer: Literal["input", "context", "output", "tool"]
+    threat_type: str
+    confidence: ThreatConfidence
+    notes: str | None = None
+
+
+class ContextSanitizedPayload(BaseModel):
+    """Data stored when retrieved context is sanitized."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    original_chunk_id: str
+    sanitization_applied: bool
+    notes: str | None = None
+
+
+class InjectionDetectedPayload(BaseModel):
+    """Signal-only prompt injection detection events."""
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=True)
+
+    location: Literal["input", "retrieval", "output"]
+    confidence: ThreatConfidence
+    pattern: str
 
 
 def new_event(event_type: str, run_id: str, data: Mapping[str, Any]) -> Event:
@@ -218,6 +250,54 @@ def retrieval_completed_event(
         number_of_chunks=len(chunk_ids), chunk_ids=list(chunk_ids)
     ).model_dump()
     return new_event("retrieval.completed", run_id, payload)
+
+
+def guardrail_triggered_event(
+    run_id: str,
+    *,
+    layer: Literal["input", "context", "output", "tool"],
+    assessment: ThreatAssessment,
+) -> Event:
+    """Helper to emit guardrail.triggered events."""
+    payload = GuardrailTriggeredPayload(
+        layer=layer,
+        threat_type=assessment.threat_type.value,
+        confidence=assessment.confidence,
+        notes=assessment.notes,
+    ).model_dump()
+    return new_event("guardrail.triggered", run_id, payload)
+
+
+def context_sanitized_event(
+    run_id: str,
+    *,
+    original_chunk_id: str,
+    sanitization_applied: bool,
+    notes: str | None = None,
+) -> Event:
+    """Helper to emit context.sanitized events."""
+    payload = ContextSanitizedPayload(
+        original_chunk_id=original_chunk_id,
+        sanitization_applied=bool(sanitization_applied),
+        notes=notes,
+    ).model_dump()
+    return new_event("context.sanitized", run_id, payload)
+
+
+def injection_detected_event(
+    run_id: str,
+    *,
+    location: Literal["input", "retrieval", "output"],
+    confidence: ThreatConfidence,
+    pattern: str,
+) -> Event:
+    """Helper to emit injection.detected events."""
+    payload = InjectionDetectedPayload(
+        location=location,
+        confidence=confidence,
+        pattern=pattern,
+    ).model_dump()
+    return new_event("injection.detected", run_id, payload)
 
 
 class EventStore:

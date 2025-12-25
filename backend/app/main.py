@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .api import (
     EMBEDDING_GENERATOR,
     EVENT_BUS,
+    GUARDRAIL_MONITOR,
     MCP_CLIENT,
     MCP_REGISTRY,
     PERMISSION_GATE,
@@ -24,6 +25,7 @@ from .ingestion import run_ingestion
 from .events import tool_discovered_event
 from .mcp.servers.calculator_server import CalculatorMCPServer
 from .mcp.servers.github_server import GitHubMCPServer
+from .settings import settings
 
 
 class _RunIdFilter(logging.Filter):
@@ -55,6 +57,7 @@ TOOL_EXECUTOR = ToolExecutor(
     PERMISSION_GATE,
     STATE_STORE,
     TRACER,
+    tool_firewall_enabled=settings.guardrails.tool_firewall_enabled,
 )
 _MCP_INITIALIZED = False
 
@@ -112,6 +115,7 @@ def create_app() -> FastAPI:
     async def _shutdown() -> None:
         await TOOL_EXECUTOR.shutdown()
         await RUN_COORDINATOR.shutdown()
+        GUARDRAIL_MONITOR.close()
 
     @app.get("/health")
     async def health() -> dict[str, str]:

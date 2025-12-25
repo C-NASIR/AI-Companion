@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Iterable, Literal, Sequence
 
 import yaml
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
@@ -31,6 +31,11 @@ class CaseExpectations(BaseModel):
     requires_citations: bool
     max_tool_calls: int | None = Field(default=None, ge=0)
     verification_should_fail: bool
+    guardrail_expected_layer: Literal["input", "context", "output", "tool"] | None = None
+    injection_signal_locations: list[
+        Literal["input", "retrieval", "output"]
+    ] = Field(default_factory=list)
+    expect_tool_denial: bool = False
     notes: str = Field(..., min_length=3)
 
     @field_validator("requires_tool", "forbidden_tool")

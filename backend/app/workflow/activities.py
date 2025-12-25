@@ -194,6 +194,8 @@ def create_retrieve_activity(ctx: ActivityContext) -> ActivityFunc:
                 await ctx.emit_error(state, "retrieve", message)
                 log_run(state.run_id, "retrieval error=%s", exc)
                 raise
+            if ctx.context_sanitizer or ctx.injection_detector:
+                chunks = await ctx.sanitize_chunks(state, chunks)
             state.set_retrieved_chunks(chunks)
             chunk_ids = [chunk.chunk_id for chunk in chunks]
             await ctx.bus.publish(retrieval_completed_event(state.run_id, chunk_ids))
@@ -209,6 +211,19 @@ def create_retrieve_activity(ctx: ActivityContext) -> ActivityFunc:
 def create_respond_activity(ctx: ActivityContext) -> ActivityFunc:
     async def _activity(state: RunState, workflow_state: WorkflowState):
         async with ctx.step_scope(state, "respond", RunPhase.RESPOND):
+            async def _stream_guarded(
+                text: str,
+                status_value: str | None = "responding",
+            ) -> None:
+                if not text:
+                    return
+                state.append_output(text)
+                await ctx.ensure_output_safe(state, enforce_citations=False)
+                if status_value:
+                    await ctx.emit_status(state, status_value)
+                for chunk in _chunk_text(text):
+                    await ctx.emit_output(state, chunk)
+
             if state.last_tool_status == "requested":
                 raise ExternalEventRequired(
                     ("tool.completed", "tool.failed", "tool.denied"),
@@ -222,18 +237,13 @@ def create_respond_activity(ctx: ActivityContext) -> ActivityFunc:
             if state.last_tool_status == "completed" and not state.output_text.strip():
                 summary = build_tool_summary_text(state)
                 if summary:
-                    state.append_output(summary)
-                    for chunk in _chunk_text(summary):
-                        await ctx.emit_output(state, chunk)
+                    await _stream_guarded(summary, status_value=None)
                 strategy = "tool_summary"
                 notes = state.requested_tool or "tool_result"
             elif plan == PlanType.DIRECT_ANSWER:
                 response_text = await _gather_response_text(state, state.retrieved_chunks, ctx)
                 if response_text:
-                    await ctx.emit_status(state, "responding")
-                    state.append_output(response_text)
-                    for chunk in _chunk_text(response_text):
-                        await ctx.emit_output(state, chunk)
+                    await _stream_guarded(response_text, status_value="responding")
             elif plan == PlanType.NEEDS_CLARIFICATION:
                 strategy = "clarify_static"
                 notes = "requesting additional details"
@@ -247,10 +257,7 @@ def create_respond_activity(ctx: ActivityContext) -> ActivityFunc:
                     snippet=snippet,
                     run_id=state.run_id,
                 )
-                await ctx.emit_status(state, "responding")
-                state.append_output(full)
-                for chunk in _chunk_text(full):
-                    await ctx.emit_output(state, chunk)
+                await _stream_guarded(full, status_value="responding")
             else:
                 strategy = "refuse_static"
                 notes = "insufficient or unsafe request"
@@ -264,10 +271,7 @@ def create_respond_activity(ctx: ActivityContext) -> ActivityFunc:
                     snippet=snippet,
                     run_id=state.run_id,
                 )
-                await ctx.emit_status(state, "responding")
-                state.append_output(full)
-                for chunk in _chunk_text(full):
-                    await ctx.emit_output(state, chunk)
+                await _stream_guarded(full, status_value="responding")
 
             state.record_decision("response_strategy", strategy, notes=notes)
             await ctx.emit_decision(state, "response_strategy", strategy, notes)
@@ -317,6 +321,7 @@ def create_verify_activity(ctx: ActivityContext) -> ActivityFunc:
                 summary = build_tool_summary_text(state)
                 if summary:
                     state.append_output(summary)
+                    await ctx.ensure_output_safe(state, enforce_citations=False)
                     await ctx.emit_output(state, summary)
 
             grounding_passed, grounding_reason = _evaluate_grounding_requirements(state)
@@ -370,6 +375,7 @@ def create_maybe_approve_activity(ctx: ActivityContext) -> ActivityFunc:
 def create_finalize_activity(ctx: ActivityContext) -> ActivityFunc:
     async def _activity(state: RunState, workflow_state: WorkflowState):
         async with ctx.step_scope(state, "finalize", RunPhase.FINALIZE):
+            await ctx.ensure_output_safe(state)
             passed = bool(state.verification_passed)
             outcome = "success" if passed else "failed"
             reason = state.verification_reason if not passed else None
@@ -377,6 +383,7 @@ def create_finalize_activity(ctx: ActivityContext) -> ActivityFunc:
                 failure_text = build_tool_failure_text(state)
                 if failure_text and not state.output_text.strip():
                     state.append_output(failure_text)
+                    await ctx.ensure_output_safe(state, enforce_citations=False)
                     await ctx.emit_output(state, failure_text)
             state.set_outcome(outcome, reason)
             state.record_decision("outcome", outcome, notes=reason)

@@ -282,3 +282,17 @@ Key behavior:
 **Quarantining failures**
 
 - Only as a last resort, temporarily set `--allow-failures 1` when invoking the CLI and leave an inline comment documenting why the failure is tolerated. Never silently skip cases; the CI workflow should make quarantines visible.
+
+## Session 10 – Guardrails, sanitization, and safety UI
+
+Session 10 adds a multi-layer guardrail system that enforces safety before, during, and after intelligence executes:
+
+- **Threat model as code** – `backend/app/guardrails/` defines the threat taxonomy plus reusable modules (input gate, context sanitizer, injection detector, output validator, refusal helpers). Every module emits structured `guardrail.triggered`, `context.sanitized`, and `injection.detected` events so failures are observable and replayable.
+- **Workflow integration** – the `RunCoordinator` runs the input gate and injection detector before a workflow starts. Sanitization and detection wrap every retrieved chunk, and the output validator blocks unsafe responses before finalize. Guardrail violations raise `GuardrailViolation`, short-circuit the workflow, and surface via `workflow.failed` + `run.failed` with explicit reasons.
+- **Tool firewall** – `backend/app/executor.py` enforces per-run allowlists, argument schemas, rate limits, and side-effect classification before touching any MCP server. Violations emit both `tool.denied` and `guardrail.triggered` (`layer="tool"`, `threat_type="tool_abuse"`).
+- **Run state & UI signals** – `RunState` now persists `sanitized_chunk_ids` and guardrail metadata (status, reason, layer, threat type). The frontend consumes the new event types, shows guardrail-driven status banners, and renders a dedicated Safety panel listing sanitized context, guardrail interventions, injection detections, and tool denials in real time.
+- **Observability** – guardrail spans inherit the workflow/tool span structure and add `error_type="guardrail_failure"` attributes so the run inspector highlights when safety—not the model—stopped execution.
+
+The result: unsafe input is refused before planning, malicious context is neutralized, tools cannot be abused, output is validated structurally, and operators/users both see a calm, consistent explanation whenever guardrails intervene.
+
+Operational rollout guidance, feature flags, and monitoring expectations live in `docs/guardrail_rollout.md`.

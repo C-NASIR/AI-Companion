@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..events import Event, EventBus, new_event
+from ..guardrails.base import GuardrailViolation
+from ..guardrails.refusal import apply_refusal
 from ..observability.tracer import Tracer
 from ..state import RunState
 from ..state_store import StateStore
@@ -303,6 +305,18 @@ class WorkflowEngine:
                 runtime.workflow_state = updated_workflow_state
                 self.state_store.save(runtime.run_state)
                 self.workflow_store.save(runtime.workflow_state)
+            except GuardrailViolation as exc:
+                self._end_workflow_span(
+                    runtime,
+                    "failed",
+                    {
+                        "error_type": "guardrail_failure",
+                        "layer": exc.layer,
+                        "threat_type": exc.assessment.threat_type.value,
+                    },
+                )
+                await self._handle_guardrail_failure(runtime, current_step, exc)
+                return
             except HumanApprovalRequired as exc:
                 runtime.workflow_state.mark_waiting_for_human()
                 self.workflow_store.save(runtime.workflow_state)
@@ -469,6 +483,46 @@ class WorkflowEngine:
         )
         self._finish_trace(runtime, "failed")
         return False, error_payload
+
+    async def _handle_guardrail_failure(
+        self,
+        runtime: WorkflowRuntime,
+        step: str,
+        violation: GuardrailViolation,
+    ) -> None:
+        """Handle guardrail-triggered failures without retries."""
+        state = runtime.run_state
+        reason = violation.assessment.notes or violation.assessment.threat_type.value
+        state.set_guardrail_status(
+            "guardrail_triggered",
+            reason=reason,
+            layer=violation.layer,
+            threat_type=violation.assessment.threat_type.value,
+        )
+        state.set_verification(passed=False, reason=reason)
+        if not state.output_text.strip():
+            apply_refusal(state, reason=reason)
+        state.set_outcome("failed", reason)
+
+        self.state_store.save(state)
+        error_payload = {
+            "error": "guardrail_triggered",
+            "step": step,
+            "layer": violation.layer,
+            "threat_type": violation.assessment.threat_type.value,
+            "notes": violation.assessment.notes,
+        }
+        runtime.workflow_state.mark_failed(error_payload)
+        self.workflow_store.save(runtime.workflow_state)
+        await self._emit_workflow_event(state.run_id, "workflow.failed", error_payload)
+        await self.bus.publish(
+            new_event(
+                "run.failed",
+                state.run_id,
+                {"reason": reason, "final_text": state.output_text},
+            )
+        )
+        self._finish_trace(runtime, "failed")
 
     async def _emit_workflow_event(
         self,

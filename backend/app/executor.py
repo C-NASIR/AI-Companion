@@ -5,16 +5,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import defaultdict
 from typing import Callable, Mapping
 
 from .events import (
     Event,
     EventBus,
+    guardrail_triggered_event,
     tool_completed_event,
     tool_denied_event,
     tool_failed_event,
     tool_server_error_event,
 )
+from .guardrails.threats import ThreatAssessment, ThreatConfidence, ThreatType
 from .mcp.client import MCPClient
 from .mcp.registry import MCPRegistry
 from .mcp.server import MCPServerError
@@ -36,6 +39,8 @@ class ToolExecutor:
         permission_gate: PermissionGate,
         state_store: StateStore,
         tracer: Tracer | None = None,
+        *,
+        tool_firewall_enabled: bool = True,
     ):
         self.bus = bus
         self.registry = registry
@@ -46,6 +51,9 @@ class ToolExecutor:
         self._queue: asyncio.Queue[Event] | None = None
         self._task: asyncio.Task[None] | None = None
         self._unsubscribe: Callable[[], None] | None = None
+        self._tool_counts: dict[str, int] = defaultdict(int)
+        self._max_tools_per_run = 3
+        self._tool_firewall_enabled = tool_firewall_enabled
 
     async def start(self) -> None:
         if self._task:
@@ -72,6 +80,8 @@ class ToolExecutor:
     async def _enqueue_event(self, event: Event) -> None:
         if event.type == "tool.requested" and self._queue is not None:
             await self._queue.put(event)
+        if event.type in {"run.completed", "run.failed"}:
+            self._tool_counts.pop(event.run_id, None)
 
     async def _run_loop(self) -> None:
         queue = self._queue
@@ -139,6 +149,69 @@ class ToolExecutor:
             )
             return
 
+        state = self.state_store.load(run_id) if self._tool_firewall_enabled else None
+        if self._tool_firewall_enabled and state and state.available_tools:
+            allowed = {entry.name for entry in state.available_tools}
+            if tool_name not in allowed:
+                await self._deny_for_guardrail(
+                    run_id,
+                    tool_name,
+                    descriptor.permission_scope,
+                    "tool_not_allowlisted",
+                )
+                self._end_tool_span(
+                    run_id,
+                    span_id,
+                    "failed",
+                    {
+                        "error_type": "guardrail_failure",
+                        "reason": "tool_not_allowlisted",
+                    },
+                )
+                return
+
+        if self._tool_firewall_enabled:
+            valid_args, arg_reason = self._validate_arguments(
+                descriptor.input_schema,
+                arguments,
+            )
+            if not valid_args:
+                await self._deny_for_guardrail(
+                    run_id,
+                    tool_name,
+                    descriptor.permission_scope,
+                    arg_reason,
+                )
+                self._end_tool_span(
+                    run_id,
+                    span_id,
+                    "failed",
+                    {
+                        "error_type": "guardrail_failure",
+                        "reason": arg_reason,
+                    },
+                )
+                return
+
+            if self._tool_counts[run_id] >= self._max_tools_per_run:
+                await self._deny_for_guardrail(
+                    run_id,
+                    tool_name,
+                    descriptor.permission_scope,
+                    "tool_rate_limit_exceeded",
+                )
+                self._end_tool_span(
+                    run_id,
+                    span_id,
+                    "failed",
+                    {
+                        "error_type": "guardrail_failure",
+                        "reason": "tool_rate_limit_exceeded",
+                    },
+                )
+                return
+            self._tool_counts[run_id] += 1
+
         self._annotate_tool_span(
             run_id,
             span_id,
@@ -146,6 +219,7 @@ class ToolExecutor:
                 "tool_name": descriptor.name,
                 "source": descriptor.source,
                 "permission_scope": descriptor.permission_scope,
+                "side_effect": self._classify_side_effect(descriptor.permission_scope),
             },
         )
         permission_context = self._permission_context_for_run(run_id)
@@ -153,12 +227,20 @@ class ToolExecutor:
             descriptor.permission_scope, permission_context
         )
         if not allowed:
-            await self._emit_denied(
-                run_id,
-                tool_name,
-                descriptor.permission_scope,
-                reason or "permission_denied",
-            )
+            if self._tool_firewall_enabled:
+                await self._deny_for_guardrail(
+                    run_id,
+                    tool_name,
+                    descriptor.permission_scope,
+                    reason or "permission_denied",
+                )
+            else:
+                await self._emit_denied(
+                    run_id,
+                    tool_name,
+                    descriptor.permission_scope,
+                    reason or "permission_denied",
+                )
             self._end_tool_span(
                 run_id,
                 span_id,
@@ -350,3 +432,77 @@ class ToolExecutor:
         if error and error.get("error_type"):
             self.tracer.add_span_attribute(run_id, span_id, "error_type", error["error_type"])
         self.tracer.end_span(run_id, span_id, status, error)
+
+    async def _deny_for_guardrail(
+        self,
+        run_id: str,
+        tool_name: str,
+        permission_scope: str,
+        reason: str,
+    ) -> None:
+        assessment = ThreatAssessment(
+            threat_type=ThreatType.TOOL_ABUSE,
+            confidence=ThreatConfidence.MEDIUM,
+            notes=reason,
+        )
+        await self.bus.publish(
+            guardrail_triggered_event(
+                run_id,
+                layer="tool",
+                assessment=assessment,
+            )
+        )
+        await self._emit_denied(run_id, tool_name, permission_scope, reason)
+
+    @staticmethod
+    def _classify_side_effect(permission_scope: str) -> str:
+        lowered = (permission_scope or "").lower()
+        if any(token in lowered for token in ("write", "modify", "delete", "admin")):
+            return "write"
+        return "read"
+
+    @staticmethod
+    def _validate_arguments(
+        schema: Mapping[str, object] | None, arguments: Mapping[str, object]
+    ) -> tuple[bool, str]:
+        if not schema:
+            return True, ""
+        properties = schema.get("properties") if isinstance(schema, Mapping) else None
+        required = schema.get("required") if isinstance(schema, Mapping) else None
+        missing: list[str] = []
+        if isinstance(required, list):
+            for field in required:
+                if field not in arguments:
+                    missing.append(str(field))
+        if missing:
+            return False, f"missing arguments: {', '.join(missing)}"
+        if isinstance(properties, Mapping) and properties:
+            unexpected = [key for key in arguments if key not in properties]
+            if unexpected:
+                return False, f"unexpected arguments: {', '.join(unexpected)}"
+            for name, constraint in properties.items():
+                if name not in arguments or not isinstance(constraint, Mapping):
+                    continue
+                expected_type = constraint.get("type")
+                if expected_type and not ToolExecutor._argument_matches_type(
+                    arguments[name], expected_type
+                ):
+                    return False, f"invalid type for argument {name}"
+        return True, ""
+
+    @staticmethod
+    def _argument_matches_type(value: object, schema_type: object) -> bool:
+        if not isinstance(schema_type, str):
+            return True
+        mapping = {
+            "string": str,
+            "number": (int, float),
+            "integer": int,
+            "boolean": bool,
+            "object": Mapping,
+            "array": (list, tuple),
+        }
+        expected = mapping.get(schema_type)
+        if not expected:
+            return True
+        return isinstance(value, expected)
