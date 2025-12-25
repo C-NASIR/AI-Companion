@@ -23,6 +23,29 @@ Session 6 keeps the event-driven backbone and knowledge foundation from earlier 
 - (Optional) OpenAI API key for live streaming. Without it the backend emits a deterministic fake response.
 - (Optional) `GITHUB_TOKEN` for the external GitHub MCP server. Leave unset to exercise permission denial paths; when provided it enables `github.list_files` and `github.read_file`.
 
+## Environment configuration
+
+1. Copy `.env.example` to `.env` and tweak values for your environment. Key variables:
+
+| Variable | Purpose |
+| --- | --- |
+| `MODEL_ROUTING_DEFAULT_MODEL` | Default model id used by the router for any capability not explicitly overridden. |
+| `MODEL_PRICE_DEFAULT_INPUT_USD`, `MODEL_PRICE_DEFAULT_OUTPUT_USD` | Per-token pricing used for cost estimation and budget enforcement. |
+| `RATE_LIMIT_GLOBAL_CONCURRENCY`, `RATE_LIMIT_TENANT_CONCURRENCY` | Concurrency caps for all tenants and individual tenants respectively. |
+| `RUN_MODEL_BUDGET_USD` | Per-run USD budget cap (0 disables the guard). |
+| `CACHE_RETRIEVAL_ENABLED`, `CACHE_TOOL_RESULTS_ENABLED` | Feature flags for the intent-aware caches. |
+| `NEXT_PUBLIC_BACKEND_URL` | Used by the frontend to reach the backend during local dev. |
+| `NEXT_PUBLIC_TENANT_ID`, `NEXT_PUBLIC_USER_ID` | Default identity filled into the chat form (can still be edited per run). |
+
+2. Run the startup validator before launching the backend (this also runs automatically inside Docker):
+
+```bash
+cd backend
+python -m app.startup_checks
+```
+
+The script fails fast if required env vars are missing, directories are not writable, or numeric values are malformed. Set `SKIP_STARTUP_CHECKS=1` only when running tests that do not touch the server.
+
 ## Run everything with Docker Compose
 
 ```bash
@@ -37,6 +60,8 @@ Ports:
 Stop with `CTRL+C`. The backend entrypoint still clears `backend/data/events` and `backend/data/state` on startup/shutdown, but the repository itself is bind-mounted into both containers. That means any code change you make locally is reflected immediately in the running containers without rebuilding; the backend auto-restarts, and the frontend dev server hot reloads the UI.
 
 > Tip: run `npm install` inside `frontend/` once on the host so `node_modules/` exists for the bind mount. The containers reuse that directory for faster restarts.
+
+> Note: The Dockerfiles use pinned base images (`python:3.11.8-slim-bullseye` and `node:20.15.1-alpine3.19`) plus `pip`/`npm ci` installs, so builds are reproducible across machines.
 
 ## Local development workflow
 
@@ -59,6 +84,8 @@ NEXT_PUBLIC_BACKEND_URL=http://localhost:8000 npm run dev
 ```
 
 Visit http://localhost:3000 and use the UI. When you click **Send**, the browser logs the generated `run_id`, POSTs to `/runs`, immediately opens an SSE connection to `/runs/{run_id}/events`, and keeps all UI state in sync with replayed timeline events. Refreshing mid-run reconnects using the stored `run_id` and replays history before live updates resume.
+
+Every run now includes tenant/user identifiers from the Chat form. Populate those fields with the tenant you are simulating—rate-limiting, caching, logging, and observability are all keyed by the identity you provide.
 
 ### Knowledge ingestion & retrieval
 
@@ -234,6 +261,95 @@ The script defaults to the repository’s `backend/data/traces` directory but ac
 | Run inspector | `http://localhost:3000/runs/{run_id}/inspect` | Dev-only route; also linked from the Status card once a run starts. |
 
 Error types follow the Session 8 classification (e.g., `network_failure`, `bad_plan`, `permission_denied`). You can filter spans by `attributes.error_type` to separate intelligence failures from system issues. All spans share the same `trace_id`, and parent-child relationships mirror real execution order—if a span lacks its parent, treat it as an observability bug.
+
+### Cost observability (Session 11 Phase 1)
+
+- Every model span now records `model_name`, `input_token_count`, `output_token_count`, and `estimated_cost_usd`. These values surface in `backend/data/traces/{run_id}.json` and via `GET /runs/{run_id}/trace`.
+- Run-level totals are stored under `trace.totals` (cost, model calls, input tokens, output tokens). When a run finishes the backend emits `cost.aggregated` with the same numbers so operators can watch for budget spikes via SSE or logs.
+- Configure pricing with environment variables: `MODEL_PRICE_DEFAULT_INPUT_USD` / `MODEL_PRICE_DEFAULT_OUTPUT_USD` set global fallbacks, while `MODEL_PRICE_<MODEL>_INPUT_USD` and `MODEL_PRICE_<MODEL>_OUTPUT_USD` override a specific model (slugify the model name to uppercase and replace non-alphanumerics with `_`, e.g., `MODEL_PRICE_GPT_4O_MINI_INPUT_USD=0.000002`).
+- Example 1: set `MODEL_PRICE_DEFAULT_INPUT_USD=0.000002` and `MODEL_PRICE_DEFAULT_OUTPUT_USD=0.000004`. If a run consumes 6 prompt tokens and 18 completion tokens, the recorded cost is `0.00006 USD` and the `cost.aggregated` event will report `total_cost_usd: 0.00006`.
+- Example 2: set `MODEL_PRICE_GPT_4O_MINI_INPUT_USD=0.0000015` and `MODEL_PRICE_GPT_4O_MINI_OUTPUT_USD=0.000003`. With 10 prompt tokens and 8 completion tokens on that model, the run logs `estimated_cost_usd: 0.000042` for the span and the summary event carries the same amount while leaving defaults untouched for other models.
+
+### Model routing (Session 11 Phase 2)
+
+- Intelligence code now requests `ModelCapability` values (`planning`, `generation`, `verification`, `classification`) and the backend routes them through `backend/app/models/router.py`.
+- Configure routing with environment variables: set `MODEL_ROUTING_DEFAULT_MODEL` for the baseline and override specific capabilities via `MODEL_ROUTING_<CAPABILITY>_MODEL` (e.g., `MODEL_ROUTING_PLANNING_MODEL=gpt-4o-mini`, `MODEL_ROUTING_VERIFICATION_MODEL=gpt-4o`). Slugs use uppercase capability names.
+- Inspect `trace.spans[].attributes.model_capability` and `model_name` (e.g., via `/runs/{id}/trace` or the Run Inspector) to confirm the router selected the intended model for each span.
+- Update the env vars and restart the backend to shift routing—no intelligence-layer changes are required.
+
+### Intent-aware caching (Session 11 Phase 3)
+
+- Retrieval lookups are cached in-memory based on `(query, corpus_version, top_k)`. `corpus_version` is derived from the ingested docs hash (`backend/app/knowledge.py`) and changes automatically whenever ingestion reloads content.
+- Tool responses for side-effect-free (“read”) scopes are cached by `(tool_name, arguments)` so repeated safe calls re-use structured outputs immediately.
+- `CACHE_RETRIEVAL_ENABLED` and `CACHE_TOOL_RESULTS_ENABLED` (default `true`) toggle each layer. When enabled, the backend emits `cache.hit` / `cache.miss` events with hashed keys plus metadata, and spans gain `retrieval_cache` / `cache_status` attributes so traces clearly show whether caches were used.
+- Cache invalidation happens transparently: a new `corpus_version` results in fresh retrieval keys, and tool caches can be cleared by restarting the backend (in-memory store). Production deployments can swap in a different `CacheStore` implementation if persistence or TTLs are required.
+
+### Tenant isolation (Session 11 Phase 4)
+
+- `POST /runs` accepts an optional `identity` block (`tenant_id`, `user_id`). When omitted, the backend falls back to `default/anonymous`, but production callers should always send explicit identifiers.
+- `RunState`, logs, events, and traces carry `tenant_id`/`user_id` so you can filter timelines per tenant. Every emitted event automatically includes these fields, and log lines inherit them via `RunState.log_extra()`.
+- Retrieval/tool caches are partitioned per tenant. Keys now include `tenant_id`, `corpus_version`, etc., ensuring that no tenant reuses another tenant’s cached retrieval chunks or tool outputs.
+- Tool executor enforces guardrails and emits cache events with identity metadata; cache hits produce `duration_ms=0` entries so you can see the savings per tenant in traces/SSE streams.
+- Internally generated system runs (e.g., ingestion, evaluations) use synthetic tenants (`knowledge-ingestion`, `evaluation`) so they cannot interfere with user workloads.
+
+### Rate limiting & degradation (Session 11 Phase 5)
+
+- Concurrency guardrails block noisy tenants before a workflow starts. Configure limits via `RATE_LIMIT_GLOBAL_CONCURRENCY` and `RATE_LIMIT_TENANT_CONCURRENCY`. When exceeded, the backend emits `rate.limit.exceeded` (scope `run_start`) and responds with HTTP 429 (client should retry later).
+- Per-run model spend is capped via `RUN_MODEL_BUDGET_USD`. Each OpenAI invocation records cost; once the limit is exceeded the run emits `rate.limit.exceeded` (scope `model_budget`), refuses with reason `budget_exhausted`, and the workflow short-circuits safely.
+- Retrieval failures no longer hard-stop runs. Instead, the backend enters degraded mode (`degraded.mode.entered` events, `RunState.degraded=true`), continues execution without context, and surfaces the degraded reason to the UI.
+- Rate-limit and degraded signals flow through events, traces, and log extras (`tenant_id`/`user_id`), enabling ops to throttle or debug specific tenants without guessing which run triggered an alert.
+
+### Operational runbooks
+
+- **Estimate cost per run** – Inspect `trace.totals` via `/runs/<id>/trace` or the Run Inspector; the frontend does not expose dollar amounts but every span includes `estimated_cost_usd`.
+- **Identify expensive spans** – Sort spans by `estimated_cost_usd` within the Inspector to find the nodes driving budgets. Cache attributes (`cache_status`) highlight opportunities to eliminate misses.
+- **Runs that stall** – `StatusCard` surfaces pending tools/retrieval. For deeper debugging, inspect `workflow.waiting_for_event` events to see which SSE events are awaited.
+- **Costs spike** – Watch for `rate.limit.exceeded` with `scope=model_budget`. Either raise `RUN_MODEL_BUDGET_USD`, trim prompts, or increase caching effectiveness before re-running.
+- **Tool failures** – Every denial/failure produces a tool alert in the UI plus the usual `tool.*` events. Inspect the corresponding tool server log or disable the tool temporarily.
+- **Disable a tool safely** – Remove it from `backend/app/mcp/servers/*` or tighten `PermissionGate`; the planner now lists remaining tools automatically and surfaces denial reasons in the UI.
+- **Throttle a noisy tenant** – Drop `RATE_LIMIT_TENANT_CONCURRENCY` or adjust the tenant id/server identity to a more restrictive account. The UI always displays which tenant/user triggered a run so throttling is data-driven.
+
+### Boring operation soak test
+
+Exercise the full stack for hours (or days) using the deterministic evaluation dataset:
+
+```bash
+cd backend
+python -m app.startup_checks
+python scripts/boring_operation_test.py --duration-minutes 60
+```
+
+The script replays every evaluation case until the duration or iteration budget is met, reporting total runs, failures, degraded runs, and latency percentiles. For a 24‑hour soak, pass `--duration-minutes 1440`. Use the summarized stats plus the emitted `rate.limit.exceeded` / `degraded.mode.entered` events to verify the system can run “boringly” with no manual intervention.
+
+## Operational runbooks
+
+### Estimate cost per run
+- Open the Run Inspector or call `GET /runs/{run_id}/trace`; the `trace.totals` block contains `total_cost_usd`, `total_model_calls`, and token counts.
+- The frontend also surfaces per-span `estimated_cost_usd` attributes, so you can quickly understand which phase consumed most of the budget without showing end users dollar amounts.
+
+### Identify expensive spans
+- In the inspector, filter spans by `attributes.estimated_cost_usd` (descending) or search for `model.` spans—each span records `model_name`, input/output token counts, and estimated spend.
+- Cross-check with `cache_status` attributes: repeated “miss” values usually flag redundant work you can optimize.
+
+### When runs stall
+- Watch `spanAlerts` and the new operational banner: “Waiting on tool” or “Retrieval pending” indicates the workflow is in a wait-state. For deeper debugging inspect `workflow.waiting_for_event` events to see the exact event types.
+- If a run remains stalled, cancel it from the Run Inspector and review the responsible tool or MCP server before re‑enabling traffic.
+
+### When costs spike
+- Look for `rate.limit.exceeded` events with `scope=model_budget`—those indicate the per-run cap is firing. Adjust `RUN_MODEL_BUDGET_USD`, reduce prompt size, or cache more aggressively before re-running.
+- To compare tenants, group Run Inspector traces by `tenant_id` and examine `trace.totals.total_cost_usd` to see which tenant is trending upward.
+
+### When tools fail
+- The UI already highlights tool failures; grab the corresponding `tool.failed` event (with `tenant_id`/`user_id`) and inspect the tool server logs for stack traces.
+- If the failure recurs, disable the tool temporarily by removing it from the MCP registry (or set `tool_firewall_enabled=false`) and rerun until the fix is deployed.
+
+### Disable a tool safely
+- Remove or comment out the tool registration in `backend/app/mcp/servers/*` or tighten the permission gate. The planner and executor now surface “Tool was not permitted” events immediately, keeping tenants informed.
+- Document the change in the README or ops channel so other operators know why it disappeared.
+
+### Throttle a noisy tenant
+- Use the tenant identity controls in the UI to reproduce the tenant’s runs, then adjust `RATE_LIMIT_TENANT_CONCURRENCY` or temporarily set their identity to a known throttled account.
+- For emergency throttling, reduce the global/tenant concurrency env vars and restart the backend; the rate limiter emits `rate.limit.exceeded` events so you can verify the noisy tenant was blocked.
 
 ## Validation checklist (Session 6)
 

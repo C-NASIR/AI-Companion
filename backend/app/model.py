@@ -5,12 +5,15 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import AsyncGenerator, Mapping, Sequence
 
 from dotenv import find_dotenv, load_dotenv
 from openai import AsyncOpenAI
 
 from .schemas import ChatMode
+from .observability.costs import estimate_cost_usd
+from .models import ModelCapability, MODEL_ROUTER
 
 _DOTENV_PATH = find_dotenv(filename=".env", usecwd=True)
 
@@ -21,8 +24,6 @@ else:
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-
 _client: AsyncOpenAI | None = None
 
 
@@ -65,6 +66,41 @@ def _format_evidence_message(
     return intro + "\n" + "\n".join(lines)
 
 
+def _approximate_tokens(char_count: int) -> int:
+    if char_count <= 0:
+        return 0
+    return max(char_count // 4, 1)
+
+
+@dataclass
+class ModelInvocationMetrics:
+    """Holds usage metadata for a single model invocation."""
+
+    model_name: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    input_char_count: int = 0
+    output_char_count: int = 0
+
+    def record_prompt_chars(self, chars: int) -> None:
+        if chars > 0:
+            self.input_char_count += chars
+
+    def record_completion_chars(self, chars: int) -> None:
+        if chars > 0:
+            self.output_char_count += chars
+
+    def ensure_estimates(self) -> None:
+        if self.input_tokens <= 0 and self.input_char_count:
+            self.input_tokens = _approximate_tokens(self.input_char_count)
+        if self.output_tokens <= 0 and self.output_char_count:
+            self.output_tokens = _approximate_tokens(self.output_char_count)
+
+    def estimated_cost_usd(self) -> float:
+        self.ensure_estimates()
+        return estimate_cost_usd(self.model_name, self.input_tokens, self.output_tokens)
+
+
 async def real_stream(
     message: str,
     context: str | None,
@@ -73,6 +109,8 @@ async def real_stream(
     retrieved_chunks: Sequence[Mapping[str, object] | object],
     *,
     is_evaluation: bool = False,
+    capability: ModelCapability,
+    metrics: ModelInvocationMetrics | None = None,
 ) -> AsyncGenerator[str, None]:
     """Stream completion chunks from OpenAI."""
     client = _get_client()
@@ -100,10 +138,15 @@ async def real_stream(
         )
     messages.append({"role": "user", "content": message})
     completion_kwargs: dict[str, object] = {
-        "model": OPENAI_MODEL,
+        "model": MODEL_ROUTER.route(capability),
         "messages": messages,
         "stream": True,
     }
+    prompt_chars = sum(len(str(item.get("content", ""))) for item in messages)
+    model_name = completion_kwargs["model"]
+    if metrics:
+        metrics.model_name = model_name
+        metrics.record_prompt_chars(prompt_chars)
     if is_evaluation:
         completion_kwargs["temperature"] = 0
         completion_kwargs["top_p"] = 1
@@ -112,14 +155,26 @@ async def real_stream(
         choice = event.choices[0]
         delta = choice.delta
         content = delta.content
+        usage = getattr(event, "usage", None)
+        if metrics and usage:
+            prompt_tokens = getattr(usage, "prompt_tokens", None)
+            completion_tokens = getattr(usage, "completion_tokens", None)
+            if prompt_tokens is not None:
+                metrics.input_tokens = int(prompt_tokens)
+            if completion_tokens is not None:
+                metrics.output_tokens = int(completion_tokens)
         if not content:
             continue
         if isinstance(content, str):
+            if metrics:
+                metrics.record_completion_chars(len(content))
             yield content
         else:
             for fragment in content:
                 text = getattr(fragment, "text", None)
                 if text:
+                    if metrics:
+                        metrics.record_completion_chars(len(text))
                     yield text
 
 
@@ -131,10 +186,17 @@ async def fake_stream(
     retrieved_chunks: Sequence[Mapping[str, object] | object],
     *,
     is_evaluation: bool = False,
+    capability: ModelCapability,
+    metrics: ModelInvocationMetrics | None = None,
 ) -> AsyncGenerator[str, None]:
     """Local deterministic stream when OpenAI credentials are unavailable."""
     snippet = (message.strip() or "…")[:60]
     context_snippet = (context.strip() if context else "none provided")[:80]
+    if metrics:
+        metrics.model_name = MODEL_ROUTER.route(capability)
+        metrics.record_prompt_chars(len(message) + len(context or ""))
+        chunk_chars = sum(len(str(_value_from_chunk(chunk, "text") or "")) for chunk in retrieved_chunks)
+        metrics.record_prompt_chars(chunk_chars)
     if retrieved_chunks:
         evidence_sentences: list[str] = []
         for chunk in retrieved_chunks:
@@ -163,6 +225,8 @@ async def fake_stream(
             " Replace OPENAI_API_KEY to enable live streaming.",
         ]
     for chunk in chunks:
+        if metrics:
+            metrics.record_completion_chars(len(chunk))
         await asyncio.sleep(0.15)
         yield chunk
 
@@ -175,6 +239,8 @@ async def stream_chat(
     retrieved_chunks: Sequence[Mapping[str, object] | object] | None = None,
     *,
     is_evaluation: bool = False,
+    capability: ModelCapability,
+    metrics: ModelInvocationMetrics | None = None,
 ) -> AsyncIterator[str]:
     """Dispatch to real or fake streamer."""
     evidence = retrieved_chunks or []
@@ -186,6 +252,8 @@ async def stream_chat(
             run_id,
             evidence,
             is_evaluation=is_evaluation,
+            capability=capability,
+            metrics=metrics,
         ):
             yield chunk
     else:
@@ -196,5 +264,7 @@ async def stream_chat(
             run_id,
             evidence,
             is_evaluation=is_evaluation,
+            capability=capability,
+            metrics=metrics,
         ):
             yield chunk

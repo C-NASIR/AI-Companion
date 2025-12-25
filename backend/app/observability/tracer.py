@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import threading
 import time
 import uuid
@@ -11,7 +12,9 @@ from datetime import datetime
 from typing import Any, Iterator
 
 from ..schemas import iso_timestamp
-from .store import TraceStore, TraceStoreError
+from .store import TraceNotInitializedError, TraceStore, TraceStoreError
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -81,6 +84,12 @@ class Tracer:
             "start_time": iso_timestamp(),
             "status": "running",
             "root_span_id": None,
+            "totals": {
+                "total_cost_usd": 0.0,
+                "total_model_calls": 0,
+                "total_input_tokens": 0,
+                "total_output_tokens": 0,
+            },
         }
         self.store.init_trace(run_id, trace)
         return trace
@@ -153,6 +162,44 @@ class Tracer:
             },
         )
         return span
+
+    def record_model_invocation(
+        self,
+        run_id: str,
+        *,
+        model_name: str,
+        input_tokens: int,
+        output_tokens: int,
+        cost_usd: float,
+    ) -> None:
+        """Update trace-level aggregates for a model invocation."""
+        try:
+            self.store.increment_totals(
+                run_id,
+                cost_delta=max(float(cost_usd), 0.0),
+                model_calls_delta=1,
+                input_tokens_delta=max(int(input_tokens or 0), 0),
+                output_tokens_delta=max(int(output_tokens or 0), 0),
+            )
+        except TraceStoreError:
+            logger.warning("unable to record model totals", extra={"run_id": run_id})
+
+    def get_trace_totals(self, run_id: str) -> dict[str, Any] | None:
+        """Return aggregate totals for a run if present."""
+        try:
+            payload = self.store.load_trace(run_id)
+        except (TraceNotInitializedError, TraceStoreError):
+            return None
+        trace = payload.get("trace") or {}
+        totals = trace.get("totals")
+        if not totals:
+            return None
+        return {
+            "total_cost_usd": float(totals.get("total_cost_usd") or 0.0),
+            "total_model_calls": int(totals.get("total_model_calls") or 0),
+            "total_input_tokens": int(totals.get("total_input_tokens") or 0),
+            "total_output_tokens": int(totals.get("total_output_tokens") or 0),
+        }
 
     def add_span_attribute(self, run_id: str, span_id: str, key: str, value: Any) -> Span:
         """Attach or update a span attribute."""

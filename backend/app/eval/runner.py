@@ -9,7 +9,7 @@ import time
 import uuid
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import AsyncIterator, Iterable, Sequence
 
 from ..api import (
     EMBEDDING_GENERATOR,
@@ -93,6 +93,36 @@ class EvaluationRunner:
             await self._shutdown_runtime()
         return results
 
+    async def soak(
+        self,
+        *,
+        iterations: int | None = None,
+        duration_seconds: float | None = None,
+        case_ids: Sequence[str] | None = None,
+    ) -> AsyncIterator[CaseRunResult]:
+        """Yield case results repeatedly for long-running soak tests."""
+        if iterations is None and duration_seconds is None:
+            raise ValueError("Provide iterations and/or duration_seconds")
+        selected = list(self._select_cases(case_ids))
+        if not selected:
+            return
+        await self._prepare_runtime()
+        start = time.perf_counter()
+        loops = 0
+        try:
+            while True:
+                for case in selected:
+                    yield await self._run_case(case)
+                loops += 1
+                if iterations is not None and loops >= iterations:
+                    break
+                if duration_seconds is not None and (
+                    time.perf_counter() - start
+                ) >= duration_seconds:
+                    break
+        finally:
+            await self._shutdown_runtime()
+
     def _select_cases(self, case_ids: Sequence[str] | None) -> Iterable[EvalCase]:
         if not case_ids:
             return list(self.dataset)
@@ -130,6 +160,8 @@ class EvaluationRunner:
             context=case.input.context,
             mode=case.mode,
             is_evaluation=True,
+             tenant_id="evaluation",
+             user_id=case.id,
         )
         completion_event = asyncio.Event()
         terminal_event: dict[str, Event] = {}

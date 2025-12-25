@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .api import (
     EMBEDDING_GENERATOR,
     EVENT_BUS,
+    CACHE_STORE,
     GUARDRAIL_MONITOR,
     MCP_CLIENT,
     MCP_REGISTRY,
@@ -26,6 +27,7 @@ from .events import tool_discovered_event
 from .mcp.servers.calculator_server import CalculatorMCPServer
 from .mcp.servers.github_server import GitHubMCPServer
 from .settings import settings
+from .startup_checks import run_startup_checks
 
 
 class _RunIdFilter(logging.Filter):
@@ -49,6 +51,7 @@ def _configure_logging() -> None:
 
 
 _configure_logging()
+run_startup_checks()
 
 TOOL_EXECUTOR = ToolExecutor(
     EVENT_BUS,
@@ -58,6 +61,8 @@ TOOL_EXECUTOR = ToolExecutor(
     STATE_STORE,
     TRACER,
     tool_firewall_enabled=settings.guardrails.tool_firewall_enabled,
+    cache_store=CACHE_STORE,
+    tool_cache_enabled=settings.caching.tool_cache_enabled,
 )
 _MCP_INITIALIZED = False
 

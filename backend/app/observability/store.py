@@ -51,6 +51,19 @@ class TraceStore:
         with path.open("r", encoding="utf-8") as handle:
             return json.load(handle)
 
+    def _ensure_totals(self, trace: dict[str, Any]) -> dict[str, Any]:
+        totals = trace.get("totals") if isinstance(trace, dict) else None
+        if not isinstance(totals, dict):
+            totals = {}
+        normalized = {
+            "total_cost_usd": float(totals.get("total_cost_usd") or 0.0),
+            "total_model_calls": int(totals.get("total_model_calls") or 0),
+            "total_input_tokens": int(totals.get("total_input_tokens") or 0),
+            "total_output_tokens": int(totals.get("total_output_tokens") or 0),
+        }
+        trace["totals"] = normalized
+        return trace
+
     def init_trace(self, run_id: str, trace_payload: dict[str, Any]) -> dict[str, Any]:
         """Create (or refresh) the trace envelope for a run."""
         path = self._trace_file(run_id)
@@ -60,9 +73,9 @@ class TraceStore:
                 payload = self._load_payload(run_id)
                 existing = payload.get("trace") or {}
                 existing.update(trace_payload)
-                payload["trace"] = existing
+                payload["trace"] = self._ensure_totals(existing)
             else:
-                payload = {"trace": dict(trace_payload), "spans": []}
+                payload = {"trace": self._ensure_totals(dict(trace_payload)), "spans": []}
             self._atomic_write(path, payload)
         return payload["trace"]
 
@@ -73,7 +86,7 @@ class TraceStore:
             payload = self._load_payload(run_id)
             trace = payload.get("trace") or {}
             trace.update(updates)
-            payload["trace"] = trace
+            payload["trace"] = self._ensure_totals(trace)
             self._atomic_write(self._trace_file(run_id), payload)
         return trace
 
@@ -109,13 +122,46 @@ class TraceStore:
         msg = f"span {span_id} not found in trace {run_id}"
         raise TraceStoreError(msg)
 
+    def increment_totals(
+        self,
+        run_id: str,
+        *,
+        cost_delta: float = 0.0,
+        model_calls_delta: int = 0,
+        input_tokens_delta: int = 0,
+        output_tokens_delta: int = 0,
+    ) -> dict[str, Any]:
+        """Atomically increment aggregate totals on the trace."""
+        lock = self._get_lock(run_id)
+        with lock:
+            payload = self._load_payload(run_id)
+            trace = self._ensure_totals(payload.get("trace") or {})
+            totals = trace["totals"]
+            totals["total_cost_usd"] = round(
+                float(totals.get("total_cost_usd", 0.0)) + float(cost_delta or 0.0),
+                6,
+            )
+            totals["total_model_calls"] = int(totals.get("total_model_calls", 0)) + max(
+                int(model_calls_delta or 0), 0
+            )
+            totals["total_input_tokens"] = int(totals.get("total_input_tokens", 0)) + max(
+                int(input_tokens_delta or 0), 0
+            )
+            totals["total_output_tokens"] = int(totals.get("total_output_tokens", 0)) + max(
+                int(output_tokens_delta or 0), 0
+            )
+            trace["totals"] = totals
+            payload["trace"] = trace
+            self._atomic_write(self._trace_file(run_id), payload)
+        return totals
+
     def load_trace(self, run_id: str) -> dict[str, Any]:
         """Return both the trace envelope and spans."""
         lock = self._get_lock(run_id)
         with lock:
             payload = self._load_payload(run_id)
             return {
-                "trace": dict(payload.get("trace") or {}),
+                "trace": self._ensure_totals(dict(payload.get("trace") or {})),
                 "spans": list(payload.get("spans") or []),
             }
 

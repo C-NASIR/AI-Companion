@@ -2,7 +2,11 @@
 
 import Link from "next/link";
 
-import type { StatusDisplay, WorkflowSummary } from "../hooks/useChatRun";
+import type {
+  OperationalAlert,
+  StatusDisplay,
+  WorkflowSummary,
+} from "../hooks/useChatRun";
 import type { SpanAlert } from "../lib/backend";
 import {
   NODE_TO_STEP_LABEL,
@@ -17,6 +21,7 @@ interface StatusCardProps {
   runOutcomeReason: string | null;
   workflowSummary: WorkflowSummary;
   spanAlerts: SpanAlert[];
+  operationalAlerts: OperationalAlert[];
 }
 
 export default function StatusCard({
@@ -26,6 +31,7 @@ export default function StatusCard({
   runOutcomeReason,
   workflowSummary,
   spanAlerts,
+  operationalAlerts,
 }: StatusCardProps) {
   const workflowStatusLabel = workflowSummary.status
     ? WORKFLOW_STATUS_LABELS[workflowSummary.status]
@@ -88,6 +94,29 @@ export default function StatusCard({
           </p>
         ) : null}
       </div>
+      {operationalAlerts.length ? (
+        <div className="mt-3 flex flex-col gap-2">
+          {operationalAlerts.map((alert, index) => {
+            const color =
+              alert.type === "budget"
+                ? "border-rose-500/40 bg-rose-500/10 text-rose-100"
+                : alert.type === "degraded"
+                ? "border-amber-400/40 bg-amber-400/10 text-amber-100"
+                : "border-indigo-500/40 bg-indigo-500/10 text-indigo-100";
+            return (
+              <div
+                key={`${alert.type}-${index}-${alert.ts}`}
+                className={`rounded-xl border p-3 text-sm ${color}`}
+              >
+                <p className="text-xs font-semibold uppercase tracking-[0.2em] opacity-80">
+                  {alert.title}
+                </p>
+                <p>{alert.message}</p>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
       {spanAlerts.length ? (
         <div className="mt-3 flex flex-col gap-2">
           {spanAlerts.map((alert, index) => (

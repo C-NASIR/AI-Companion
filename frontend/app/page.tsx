@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import ApprovalGate from "../components/ApprovalGate";
 import ChatForm from "../components/ChatForm";
@@ -17,8 +17,36 @@ export default function HomePage() {
   const [message, setMessage] = useState("");
   const [context, setContext] = useState("");
   const [mode, setMode] = useState<ChatMode>("answer");
+  const defaultTenant =
+    process.env.NEXT_PUBLIC_TENANT_ID?.trim() || "tenant-demo";
+  const defaultUser =
+    process.env.NEXT_PUBLIC_USER_ID?.trim() || "user-demo";
+  const [tenantId, setTenantId] = useState(defaultTenant);
+  const [userId, setUserId] = useState(defaultUser);
 
-  const chatRun = useChatRun({ message, context, mode });
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const storedTenant = window.localStorage.getItem("ai_companion_tenant");
+    const storedUser = window.localStorage.getItem("ai_companion_user");
+    if (storedTenant) {
+      setTenantId(storedTenant);
+    }
+    if (storedUser) {
+      setUserId(storedUser);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem("ai_companion_tenant", tenantId);
+  }, [tenantId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem("ai_companion_user", userId);
+  }, [userId]);
+
+  const chatRun = useChatRun({ message, context, mode, tenantId, userId });
   const feedback = useFeedback({
     runComplete: chatRun.runComplete,
     currentRunId: chatRun.currentRunId,
@@ -32,12 +60,16 @@ export default function HomePage() {
         message={message}
         context={context}
         mode={mode}
+        tenantId={tenantId}
+        userId={userId}
         isStreaming={chatRun.isStreaming}
         canSend={chatRun.canSend}
         formError={chatRun.formError}
         onMessageChange={setMessage}
         onContextChange={setContext}
         onModeChange={setMode}
+        onTenantChange={setTenantId}
+        onUserChange={setUserId}
         onSend={chatRun.handleSend}
       />
       <section className="flex w-full flex-1 flex-col gap-4">
@@ -48,6 +80,7 @@ export default function HomePage() {
           runOutcomeReason={chatRun.runOutcomeReason}
           workflowSummary={chatRun.workflowSummary}
           spanAlerts={chatRun.spanAlerts}
+          operationalAlerts={chatRun.operationalAlerts}
         />
         <ApprovalGate
           waiting={chatRun.approvalState.waiting}

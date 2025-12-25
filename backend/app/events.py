@@ -133,15 +133,70 @@ class InjectionDetectedPayload(BaseModel):
     pattern: str
 
 
-def new_event(event_type: str, run_id: str, data: Mapping[str, Any]) -> Event:
+class CostAggregatedPayload(BaseModel):
+    """Run-level cost summary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    total_cost_usd: float
+    total_model_calls: int = Field(ge=0)
+    total_input_tokens: int = Field(ge=0, default=0)
+    total_output_tokens: int = Field(ge=0, default=0)
+
+
+class CacheEventPayload(BaseModel):
+    """Cache hit/miss metadata."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    cache_name: Literal["retrieval", "tool_result"]
+    key: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RateLimitEventPayload(BaseModel):
+    """Rate limiting metadata."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    scope: str
+    reason: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class DegradedModePayload(BaseModel):
+    """Signals when a run enters degraded mode."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+def _apply_identity(payload: dict[str, Any], identity: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not identity:
+        return payload
+    tenant = identity.get("tenant_id")
+    user = identity.get("user_id")
+    if tenant and "tenant_id" not in payload:
+        payload["tenant_id"] = tenant
+    if user and "user_id" not in payload:
+        payload["user_id"] = user
+    return payload
+
+
+def new_event(
+    event_type: str, run_id: str, data: Mapping[str, Any], identity: Mapping[str, Any] | None = None
+) -> Event:
     """Create a fresh event with metadata initialized."""
+    payload = _apply_identity(dict(data), identity)
     return Event(
         id=str(uuid4()),
         run_id=run_id,
         seq=0,
         ts=iso_timestamp(),
         type=event_type,
-        data=dict(data),
+        data=payload,
     )
 
 
@@ -153,6 +208,7 @@ def tool_requested_event(
     source: str | None = None,
     permission_scope: str | None = None,
     parent_span_id: str | None = None,
+    identity: Mapping[str, Any] | None = None,
 ) -> Event:
     """Helper to build validated tool.requested events."""
     payload = ToolRequestedPayload(
@@ -162,7 +218,7 @@ def tool_requested_event(
         permission_scope=permission_scope,
         parent_span_id=parent_span_id,
     ).model_dump()
-    return new_event("tool.requested", run_id, payload)
+    return new_event("tool.requested", run_id, payload, identity=identity)
 
 
 def tool_completed_event(
@@ -178,7 +234,7 @@ def tool_completed_event(
         output=dict(output),
         duration_ms=max(int(duration_ms), 0),
     ).model_dump()
-    return new_event("tool.completed", run_id, payload)
+    return new_event("tool.completed", run_id, payload, identity=identity)
 
 
 def tool_failed_event(
@@ -187,6 +243,7 @@ def tool_failed_event(
     tool_name: str,
     error: Mapping[str, Any],
     duration_ms: int,
+    identity: Mapping[str, Any] | None = None,
 ) -> Event:
     """Helper to build validated tool.failed events."""
     payload = ToolFailedPayload(
@@ -194,18 +251,23 @@ def tool_failed_event(
         error=dict(error),
         duration_ms=max(int(duration_ms), 0),
     ).model_dump()
-    return new_event("tool.failed", run_id, payload)
+    return new_event("tool.failed", run_id, payload, identity=identity)
 
 
 def tool_discovered_event(
-    run_id: str, *, tool_name: str, source: str, permission_scope: str
+    run_id: str,
+    *,
+    tool_name: str,
+    source: str,
+    permission_scope: str,
+    identity: Mapping[str, Any] | None = None,
 ) -> Event:
     payload = ToolDiscoveredPayload(
         tool_name=tool_name,
         source=source,
         permission_scope=permission_scope,
     ).model_dump()
-    return new_event("tool.discovered", run_id, payload)
+    return new_event("tool.discovered", run_id, payload, identity=identity)
 
 
 def tool_denied_event(
@@ -214,42 +276,55 @@ def tool_denied_event(
     tool_name: str,
     permission_scope: str,
     reason: str,
+    identity: Mapping[str, Any] | None = None,
 ) -> Event:
     payload = ToolDeniedPayload(
         tool_name=tool_name,
         permission_scope=permission_scope,
         reason=reason,
     ).model_dump()
-    return new_event("tool.denied", run_id, payload)
+    return new_event("tool.denied", run_id, payload, identity=identity)
 
 
 def tool_server_error_event(
-    run_id: str, *, server_id: str, error: Mapping[str, Any]
+    run_id: str,
+    *,
+    server_id: str,
+    error: Mapping[str, Any],
+    identity: Mapping[str, Any] | None = None,
 ) -> Event:
     payload = ToolServerErrorPayload(
         server_id=server_id,
         error=dict(error),
     ).model_dump()
-    return new_event("tool.server.error", run_id, payload)
+    return new_event("tool.server.error", run_id, payload, identity=identity)
 
 
-def retrieval_started_event(run_id: str, query: str | None = None) -> Event:
+def retrieval_started_event(
+    run_id: str,
+    query: str | None = None,
+    *,
+    identity: Mapping[str, Any] | None = None,
+) -> Event:
     """Helper to emit retrieval.started events."""
     payload: dict[str, Any] = {}
     if query is not None:
         payload["query"] = query
     payload["query_length"] = len(query or "")
-    return new_event("retrieval.started", run_id, payload)
+    return new_event("retrieval.started", run_id, payload, identity=identity)
 
 
 def retrieval_completed_event(
-    run_id: str, chunk_ids: Sequence[str]
+    run_id: str,
+    chunk_ids: Sequence[str],
+    *,
+    identity: Mapping[str, Any] | None = None,
 ) -> Event:
     """Helper to emit retrieval.completed events."""
     payload = RetrievalCompletedPayload(
         number_of_chunks=len(chunk_ids), chunk_ids=list(chunk_ids)
     ).model_dump()
-    return new_event("retrieval.completed", run_id, payload)
+    return new_event("retrieval.completed", run_id, payload, identity=identity)
 
 
 def guardrail_triggered_event(
@@ -257,6 +332,7 @@ def guardrail_triggered_event(
     *,
     layer: Literal["input", "context", "output", "tool"],
     assessment: ThreatAssessment,
+    identity: Mapping[str, Any] | None = None,
 ) -> Event:
     """Helper to emit guardrail.triggered events."""
     payload = GuardrailTriggeredPayload(
@@ -265,7 +341,7 @@ def guardrail_triggered_event(
         confidence=assessment.confidence,
         notes=assessment.notes,
     ).model_dump()
-    return new_event("guardrail.triggered", run_id, payload)
+    return new_event("guardrail.triggered", run_id, payload, identity=identity)
 
 
 def context_sanitized_event(
@@ -274,6 +350,7 @@ def context_sanitized_event(
     original_chunk_id: str,
     sanitization_applied: bool,
     notes: str | None = None,
+    identity: Mapping[str, Any] | None = None,
 ) -> Event:
     """Helper to emit context.sanitized events."""
     payload = ContextSanitizedPayload(
@@ -281,7 +358,7 @@ def context_sanitized_event(
         sanitization_applied=bool(sanitization_applied),
         notes=notes,
     ).model_dump()
-    return new_event("context.sanitized", run_id, payload)
+    return new_event("context.sanitized", run_id, payload, identity=identity)
 
 
 def injection_detected_event(
@@ -290,6 +367,7 @@ def injection_detected_event(
     location: Literal["input", "retrieval", "output"],
     confidence: ThreatConfidence,
     pattern: str,
+    identity: Mapping[str, Any] | None = None,
 ) -> Event:
     """Helper to emit injection.detected events."""
     payload = InjectionDetectedPayload(
@@ -297,7 +375,85 @@ def injection_detected_event(
         confidence=confidence,
         pattern=pattern,
     ).model_dump()
-    return new_event("injection.detected", run_id, payload)
+    return new_event("injection.detected", run_id, payload, identity=identity)
+
+
+def cost_aggregated_event(
+    run_id: str,
+    *,
+    total_cost_usd: float,
+    total_model_calls: int,
+    total_input_tokens: int = 0,
+    total_output_tokens: int = 0,
+) -> Event:
+    """Emit cost.aggregated events for run-level accounting."""
+    payload = CostAggregatedPayload(
+        total_cost_usd=float(total_cost_usd),
+        total_model_calls=max(int(total_model_calls), 0),
+        total_input_tokens=max(int(total_input_tokens), 0),
+        total_output_tokens=max(int(total_output_tokens), 0),
+    ).model_dump()
+    return new_event("cost.aggregated", run_id, payload, identity=identity)
+
+
+def cache_hit_event(
+    run_id: str,
+    *,
+    cache_name: Literal["retrieval", "tool_result"],
+    key: str,
+    metadata: Mapping[str, Any] | None = None,
+) -> Event:
+    payload = CacheEventPayload(
+        cache_name=cache_name,
+        key=key,
+        metadata=dict(metadata or {}),
+    ).model_dump()
+    return new_event("cache.hit", run_id, payload, identity=identity)
+
+
+def cache_miss_event(
+    run_id: str,
+    *,
+    cache_name: Literal["retrieval", "tool_result"],
+    key: str,
+    metadata: Mapping[str, Any] | None = None,
+) -> Event:
+    payload = CacheEventPayload(
+        cache_name=cache_name,
+        key=key,
+        metadata=dict(metadata or {}),
+    ).model_dump()
+    return new_event("cache.miss", run_id, payload, identity=identity)
+
+
+def rate_limit_exceeded_event(
+    run_id: str,
+    *,
+    scope: str,
+    reason: str,
+    metadata: Mapping[str, Any] | None = None,
+    identity: Mapping[str, Any] | None = None,
+) -> Event:
+    payload = RateLimitEventPayload(
+        scope=scope,
+        reason=reason,
+        metadata=dict(metadata or {}),
+    ).model_dump()
+    return new_event("rate.limit.exceeded", run_id, payload, identity=identity)
+
+
+def degraded_mode_event(
+    run_id: str,
+    *,
+    reason: str,
+    metadata: Mapping[str, Any] | None = None,
+    identity: Mapping[str, Any] | None = None,
+) -> Event:
+    payload = DegradedModePayload(
+        reason=reason,
+        metadata=dict(metadata or {}),
+    ).model_dump()
+    return new_event("degraded.mode.entered", run_id, payload, identity=identity)
 
 
 class EventStore:

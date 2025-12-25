@@ -7,12 +7,16 @@ interface ChatFormProps {
   message: string;
   context: string;
   mode: ChatMode;
+  tenantId: string;
+  userId: string;
   isStreaming: boolean;
   canSend: boolean;
   formError: string | null;
   onMessageChange: (value: string) => void;
   onContextChange: (value: string) => void;
   onModeChange: (mode: ChatMode) => void;
+  onTenantChange: (value: string) => void;
+  onUserChange: (value: string) => void;
   onSend: () => void;
 }
 
@@ -20,12 +24,16 @@ export default function ChatForm({
   message,
   context,
   mode,
+  tenantId,
+  userId,
   isStreaming,
   canSend,
   formError,
   onMessageChange,
   onContextChange,
   onModeChange,
+  onTenantChange,
+  onUserChange,
   onSend,
 }: ChatFormProps) {
   return (
@@ -77,6 +85,37 @@ export default function ChatForm({
           ))}
         </select>
       </label>
+      <div className="flex flex-col gap-3 text-sm font-semibold text-slate-200">
+        <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">
+          Identity
+        </p>
+        <div className="flex flex-col gap-3 md:flex-row">
+          <label className="flex flex-1 flex-col gap-2 text-sm font-semibold text-slate-200">
+            Tenant ID
+            <input
+              className="w-full rounded-xl border border-slate-700 bg-slate-950/70 p-3 text-base text-slate-50 outline-none transition focus:border-slate-500 focus:ring-2 focus:ring-slate-600"
+              value={tenantId}
+              onChange={(event) => onTenantChange(event.target.value)}
+              placeholder="tenant-id"
+              disabled={isStreaming}
+            />
+          </label>
+          <label className="flex flex-1 flex-col gap-2 text-sm font-semibold text-slate-200">
+            User ID
+            <input
+              className="w-full rounded-xl border border-slate-700 bg-slate-950/70 p-3 text-base text-slate-50 outline-none transition focus:border-slate-500 focus:ring-2 focus:ring-slate-600"
+              value={userId}
+              onChange={(event) => onUserChange(event.target.value)}
+              placeholder="user-id"
+              disabled={isStreaming}
+            />
+          </label>
+        </div>
+        <p className="text-xs font-normal text-slate-400">
+          Tenant and user IDs travel with every run so operators can isolate
+          noisy tenants and follow run histories.
+        </p>
+      </div>
       <button
         className={`rounded-full px-6 py-3 text-base font-semibold transition focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-200 disabled:cursor-not-allowed disabled:bg-slate-700 ${
           canSend

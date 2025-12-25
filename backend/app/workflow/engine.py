@@ -520,6 +520,7 @@ class WorkflowEngine:
                 "run.failed",
                 state.run_id,
                 {"reason": reason, "final_text": state.output_text},
+                identity={"tenant_id": state.tenant_id, "user_id": state.user_id},
             )
         )
         self._finish_trace(runtime, "failed")
@@ -536,7 +537,8 @@ class WorkflowEngine:
             if run_id in self._runtimes
             else data.get("status")
         )
-        await self.bus.publish(new_event(event_type, run_id, payload))
+        identity = self._identity_for_run(run_id)
+        await self.bus.publish(new_event(event_type, run_id, payload, identity=identity))
 
     def _ensure_root_span(self, runtime: WorkflowRuntime) -> None:
         if not self.tracer or runtime.root_span_id:
@@ -655,3 +657,9 @@ class WorkflowEngine:
             "verify": "verification_failure",
         }
         return mapping.get(step, "network_failure")
+    def _identity_for_run(self, run_id: str) -> dict[str, str] | None:
+        runtime = self._runtimes.get(run_id)
+        state = runtime.run_state if runtime else self.state_store.load(run_id)
+        if not state:
+            return None
+        return {"tenant_id": state.tenant_id, "user_id": state.user_id}

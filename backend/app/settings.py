@@ -44,11 +44,30 @@ class GuardrailSettings:
     )
 
 
+@dataclass(frozen=True)
+class CachingSettings:
+    """Feature flags for cache layers."""
+
+    retrieval_cache_enabled: bool = _env_bool("CACHE_RETRIEVAL_ENABLED", True)
+    tool_cache_enabled: bool = _env_bool("CACHE_TOOL_RESULTS_ENABLED", True)
+
+
+@dataclass(frozen=True)
+class LimitSettings:
+    """Rate limiting and budget controls."""
+
+    global_concurrency: int = _env_int("RATE_LIMIT_GLOBAL_CONCURRENCY", 8)
+    tenant_concurrency: int = _env_int("RATE_LIMIT_TENANT_CONCURRENCY", 4)
+    model_budget_usd: float = float(os.getenv("RUN_MODEL_BUDGET_USD", "0") or 0)
+
+
 class Settings:
     """Container for application settings."""
 
     def __init__(self) -> None:
         self.guardrails = GuardrailSettings()
+        self.caching = CachingSettings()
+        self.limits = LimitSettings()
 
 
 settings = Settings()

@@ -27,9 +27,19 @@ class NodeContext:
         self.retrieval_store = retrieval_store
         self._allowed_tools_provider = allowed_tools_provider
 
+    def _identity(self, state: RunState) -> dict[str, str]:
+        return {"tenant_id": state.tenant_id, "user_id": state.user_id}
+
     async def emit(self, state: RunState, event_type: str, data: Mapping[str, object]) -> None:
         """Publish an event through the bus."""
-        await self.bus.publish(new_event(event_type, state.run_id, data))
+        await self.bus.publish(
+            new_event(
+                event_type,
+                state.run_id,
+                data,
+                identity=self._identity(state),
+            )
+        )
 
     async def emit_status(self, state: RunState, value: str) -> None:
         await self.emit(state, "status.changed", {"value": value})

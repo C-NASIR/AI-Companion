@@ -30,6 +30,7 @@ def _choose_plan(state: RunState) -> tuple[PlanType, str]:
 async def plan_node(state: RunState, ctx: NodeContext) -> RunState:
     """Decide which strategy to use."""
     async with ctx.node_scope(state, "plan", RunPhase.PLAN):
+        identity = {"tenant_id": state.tenant_id, "user_id": state.user_id}
         await ctx.emit_status(state, "thinking")
         plan_type, reason = _choose_plan(state)
         state.set_plan_type(plan_type)
@@ -51,6 +52,7 @@ async def plan_node(state: RunState, ctx: NodeContext) -> RunState:
                     tool_name=descriptor.name,
                     source=descriptor.source,
                     permission_scope=descriptor.permission_scope,
+                    identity=identity,
                 )
             )
 
@@ -80,6 +82,7 @@ async def plan_node(state: RunState, ctx: NodeContext) -> RunState:
                     arguments=arguments,
                     source=descriptor.source,
                     permission_scope=descriptor.permission_scope,
+                    identity=identity,
                 )
             )
             log_run(

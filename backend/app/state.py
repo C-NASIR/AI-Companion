@@ -96,6 +96,12 @@ class RunState(BaseModel):
     context: str | None = None
     mode: ChatMode
     is_evaluation: bool = False
+    tenant_id: str = "default"
+    user_id: str = "anonymous"
+    cost_limit_usd: float | None = None
+    cost_spent_usd: float = 0.0
+    degraded: bool = False
+    degraded_reason: str | None = None
     phase: RunPhase = Field(default=RunPhase.INIT)
     plan_type: PlanType | None = None
     verification_passed: bool | None = None
@@ -139,15 +145,23 @@ class RunState(BaseModel):
         context: str | None,
         mode: ChatMode,
         is_evaluation: bool = False,
+        tenant_id: str = "default",
+        user_id: str = "anonymous",
+        cost_limit_usd: float | None = None,
     ) -> "RunState":
         """Create a new RunState instance with synchronized timestamps."""
         ts = iso_timestamp()
+        tenant = (tenant_id or "default").strip() or "default"
+        user = (user_id or "anonymous").strip() or "anonymous"
         return cls(
             run_id=run_id,
             message=message,
             context=context,
             mode=mode,
             is_evaluation=is_evaluation,
+            tenant_id=tenant,
+            user_id=user,
+            cost_limit_usd=cost_limit_usd,
             phase=RunPhase.INIT,
             created_at=ts,
             updated_at=ts,
@@ -159,7 +173,26 @@ class RunState(BaseModel):
 
     def log_extra(self) -> dict[str, str]:
         """Return a logging extra payload that enforces run_id tagging."""
-        return {"run_id": self.run_id}
+        return {
+            "run_id": self.run_id,
+            "tenant_id": self.tenant_id,
+            "user_id": self.user_id,
+        }
+
+    def record_model_cost(self, amount_usd: float) -> float:
+        """Track cumulative model spend."""
+        if amount_usd:
+            self.cost_spent_usd = max(self.cost_spent_usd + amount_usd, 0.0)
+            self._touch()
+        return self.cost_spent_usd
+
+    def mark_degraded(self, reason: str) -> bool:
+        """Set degraded mode for the run."""
+        was_degraded = self.degraded
+        self.degraded = True
+        self.degraded_reason = reason
+        self._touch()
+        return not was_degraded
 
     def transition_phase(self, new_phase: RunPhase) -> None:
         """Move the run into a new phase."""

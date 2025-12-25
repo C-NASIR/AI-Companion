@@ -1,15 +1,15 @@
-FROM node:20-alpine AS deps
+FROM node:20.15.1-alpine3.19 AS deps
 WORKDIR /app
 COPY package.json package-lock.json* ./ 
-RUN npm install
+RUN npm ci
 
-FROM node:20-alpine AS builder
+FROM node:20.15.1-alpine3.19 AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm run build
 
-FROM node:20-alpine AS runner
+FROM node:20.15.1-alpine3.19 AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=builder /app/next.config.js ./next.config.js

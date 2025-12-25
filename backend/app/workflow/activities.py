@@ -5,12 +5,18 @@ from __future__ import annotations
 from typing import Any, Mapping, Sequence
 
 from ..events import (
+    cache_hit_event,
+    cache_miss_event,
     retrieval_completed_event,
     retrieval_started_event,
     tool_discovered_event,
     tool_requested_event,
 )
-from ..model import OPENAI_MODEL, stream_chat
+from ..knowledge import get_corpus_version
+from ..model import ModelInvocationMetrics, stream_chat
+from ..models import ModelCapability
+from ..retrieval import RetrievedChunk
+from ..limits.budget import BudgetExceeded
 from ..schemas import ChatMode
 from ..state import PlanType, RunPhase, RunState
 from ..intelligence.intents import match_tool_intent
@@ -31,6 +37,7 @@ def _chunk_text(text: str, size: int = 64) -> list[str]:
 async def _gather_response_text(
     state: RunState,
     retrieved_chunks: Sequence[Mapping[str, Any]],
+    capability: ModelCapability,
     ctx: ActivityContext | None = None,
 ) -> str:
     chunks: list[str] = []
@@ -39,6 +46,8 @@ async def _gather_response_text(
     span_id: str | None = None
     status = "success"
     error_payload: dict[str, Any] | None = None
+    metrics = ModelInvocationMetrics()
+    estimated_cost = 0.0
     if tracer:
         parent_span_id = ctx.current_node_span(run_id) if ctx else None
         span_id = tracer.start_span(
@@ -47,7 +56,7 @@ async def _gather_response_text(
             "model",
             parent_span_id=parent_span_id,
             attributes={
-                "model": OPENAI_MODEL,
+                "model_capability": capability.value,
                 "mode": state.mode.value,
                 "is_evaluation": state.is_evaluation,
             },
@@ -60,6 +69,8 @@ async def _gather_response_text(
             run_id,
             retrieved_chunks,
             is_evaluation=state.is_evaluation,
+            capability=capability,
+            metrics=metrics,
         ):
             chunks.append(chunk)
     except Exception as exc:
@@ -73,9 +84,24 @@ async def _gather_response_text(
     finally:
         if tracer and span_id:
             tracer.add_span_attribute(run_id, span_id, "chunk_count", len(chunks))
+            metrics.ensure_estimates()
+            tracer.add_span_attribute(run_id, span_id, "input_token_count", metrics.input_tokens)
+            tracer.add_span_attribute(run_id, span_id, "output_token_count", metrics.output_tokens)
+            tracer.add_span_attribute(run_id, span_id, "estimated_cost_usd", metrics.estimated_cost_usd())
+            tracer.add_span_attribute(run_id, span_id, "model_name", metrics.model_name)
             if error_payload:
                 tracer.add_span_attribute(run_id, span_id, "error_type", error_payload["error_type"])
             tracer.end_span(run_id, span_id, status, error_payload)
+            tracer.record_model_invocation(
+                run_id,
+                model_name=metrics.model_name,
+                input_tokens=metrics.input_tokens,
+                output_tokens=metrics.output_tokens,
+                cost_usd=metrics.estimated_cost_usd(),
+            )
+        estimated_cost = metrics.estimated_cost_usd()
+        if ctx:
+            await ctx.record_model_cost(state, estimated_cost)
     return "".join(chunks)
 
 
@@ -100,6 +126,7 @@ def create_plan_activity(ctx: ActivityContext) -> ActivityFunc:
 
     async def _activity(state: RunState, workflow_state: WorkflowState):
         async with ctx.step_scope(state, "plan", RunPhase.PLAN):
+            identity = ctx._identity(state)
             await ctx.emit_status(state, "thinking")
             plan_type, reason = _choose_plan(state)
             state.set_plan_type(plan_type)
@@ -121,6 +148,7 @@ def create_plan_activity(ctx: ActivityContext) -> ActivityFunc:
                         tool_name=descriptor.name,
                         source=descriptor.source,
                         permission_scope=descriptor.permission_scope,
+                        identity=identity,
                     )
                 )
 
@@ -155,6 +183,7 @@ def create_plan_activity(ctx: ActivityContext) -> ActivityFunc:
                             source=descriptor.source,
                             permission_scope=descriptor.permission_scope,
                             parent_span_id=ctx.current_node_span(state.run_id),
+                            identity=identity,
                         )
                     )
                     log_run(
@@ -172,6 +201,7 @@ def create_plan_activity(ctx: ActivityContext) -> ActivityFunc:
 def create_retrieve_activity(ctx: ActivityContext) -> ActivityFunc:
     async def _activity(state: RunState, workflow_state: WorkflowState):
         async with ctx.step_scope(state, "retrieve", RunPhase.RETRIEVE):
+            identity = ctx._identity(state)
             if state.last_tool_status == "requested":
                 raise ExternalEventRequired(
                     ("tool.completed", "tool.failed", "tool.denied"),
@@ -180,25 +210,84 @@ def create_retrieve_activity(ctx: ActivityContext) -> ActivityFunc:
             query = state.message.strip()
             if state.context:
                 query = f"{query}\n\nContext:\n{state.context.strip()}"
-            await ctx.bus.publish(retrieval_started_event(state.run_id, query))
+            await ctx.bus.publish(
+                retrieval_started_event(state.run_id, query, identity=identity)
+            )
             log_run(
                 state.run_id,
                 "retrieval querying top_k=%s query_length=%s",
                 3,
                 len(query),
             )
+            top_k = 3
+            corpus_version = get_corpus_version()
+            cache_status = "disabled"
+            cached_chunks: list[RetrievedChunk] | None = None
+            cache_key: str | None = None
+            if ctx.cache_store and ctx.retrieval_cache_enabled:
+                cache_key, cached_chunks = ctx.cache_store.retrieval_lookup(
+                    state.tenant_id,
+                    query,
+                    corpus_version,
+                    top_k,
+                )
+            cache_metadata = {
+                "corpus_version": corpus_version,
+                "top_k": top_k,
+                "tenant_id": state.tenant_id,
+            }
+            if ctx.cache_store and ctx.retrieval_cache_enabled:
+                if cached_chunks is not None:
+                    cache_status = "hit"
+                    await ctx.bus.publish(
+                        cache_hit_event(
+                            state.run_id,
+                            cache_name="retrieval",
+                            key=cache_key,
+                            metadata=cache_metadata,
+                            identity=identity,
+                        )
+                    )
+                else:
+                    cache_status = "miss"
+                    await ctx.bus.publish(
+                        cache_miss_event(
+                            state.run_id,
+                            cache_name="retrieval",
+                            key=cache_key,
+                            metadata=cache_metadata,
+                            identity=identity,
+                        )
+                    )
+            ctx.add_node_attribute(state.run_id, "retrieval_cache", cache_status)
             try:
-                chunks = ctx.retrieval_store.query(query, top_k=3)
+                if cached_chunks is not None:
+                    chunks = cached_chunks
+                else:
+                    chunks = ctx.retrieval_store.query(query, top_k=top_k)
+                    if (
+                        cache_key
+                        and ctx.cache_store
+                        and ctx.retrieval_cache_enabled
+                        and chunks
+                    ):
+                        ctx.cache_store.store_retrieval(
+                            state.tenant_id, query, corpus_version, top_k, chunks
+                        )
             except Exception as exc:  # pragma: no cover - defensive guard
+                reason = "retrieval_unavailable"
+                await ctx.enter_degraded_mode(state, reason)
                 message = f"retrieval_failed: {exc}"
                 await ctx.emit_error(state, "retrieve", message)
-                log_run(state.run_id, "retrieval error=%s", exc)
-                raise
+                log_run(state.run_id, "retrieval degraded error=%s", exc)
+                chunks = []
             if ctx.context_sanitizer or ctx.injection_detector:
                 chunks = await ctx.sanitize_chunks(state, chunks)
             state.set_retrieved_chunks(chunks)
             chunk_ids = [chunk.chunk_id for chunk in chunks]
-            await ctx.bus.publish(retrieval_completed_event(state.run_id, chunk_ids))
+            await ctx.bus.publish(
+                retrieval_completed_event(state.run_id, chunk_ids, identity=identity)
+            )
             decision_value = str(len(chunk_ids))
             notes = f"{decision_value} chunk(s) retrieved"
             state.record_decision("retrieval_chunks", decision_value, notes=notes)
@@ -241,7 +330,26 @@ def create_respond_activity(ctx: ActivityContext) -> ActivityFunc:
                 strategy = "tool_summary"
                 notes = state.requested_tool or "tool_result"
             elif plan == PlanType.DIRECT_ANSWER:
-                response_text = await _gather_response_text(state, state.retrieved_chunks, ctx)
+                try:
+                    response_text = await _gather_response_text(
+                        state,
+                        state.retrieved_chunks,
+                        ModelCapability.GENERATION,
+                        ctx,
+                    )
+                except BudgetExceeded:
+                    refusal = "Run halted: model budget exhausted."
+                    await _stream_guarded(refusal, status_value="failed")
+                    state.record_decision("budget_status", "exhausted", notes="model_budget_exceeded")
+                    state.set_guardrail_status(
+                        "budget_exhausted",
+                        reason="budget_exhausted",
+                        layer="system",
+                        threat_type="resource_limit",
+                    )
+                    state.set_verification(passed=False, reason="budget_exhausted")
+                    state.set_outcome("failed", "budget_exhausted")
+                    raise
                 if response_text:
                     await _stream_guarded(response_text, status_value="responding")
             elif plan == PlanType.NEEDS_CLARIFICATION:

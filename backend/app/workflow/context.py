@@ -5,7 +5,13 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from typing import Callable, Mapping, Sequence
 
-from ..events import EventBus, new_event
+from ..cache import CacheStore
+from ..events import (
+    EventBus,
+    degraded_mode_event,
+    new_event,
+    rate_limit_exceeded_event,
+)
 from ..guardrails.base import GuardrailViolation
 from ..guardrails.context_sanitizer import ContextSanitizer
 from ..guardrails.injection_detector import InjectionDetector
@@ -17,6 +23,7 @@ from ..state import RunPhase, RunState
 from ..state_store import StateStore
 from ..observability.tracer import Tracer
 from .exceptions import ExternalEventRequired, HumanApprovalRequired
+from ..limits.budget import BudgetManager, BudgetExceeded
 
 
 class ActivityContext:
@@ -34,6 +41,9 @@ class ActivityContext:
         context_sanitizer: ContextSanitizer | None = None,
         output_validator: OutputValidator | None = None,
         injection_detector: InjectionDetector | None = None,
+        cache_store: CacheStore | None = None,
+        retrieval_cache_enabled: bool = True,
+        budget_manager: BudgetManager | None = None,
     ):
         self.bus = bus
         self.state_store = state_store
@@ -45,10 +55,23 @@ class ActivityContext:
         self.context_sanitizer = context_sanitizer
         self.output_validator = output_validator
         self.injection_detector = injection_detector
+        self.cache_store = cache_store
+        self.retrieval_cache_enabled = retrieval_cache_enabled
+        self.budget_manager = budget_manager
+
+    def _identity(self, state: RunState) -> dict[str, str]:
+        return {"tenant_id": state.tenant_id, "user_id": state.user_id}
 
     async def emit_event(self, state: RunState, event_type: str, data: Mapping[str, object]) -> None:
         """Publish an event with run metadata."""
-        await self.bus.publish(new_event(event_type, state.run_id, data))
+        await self.bus.publish(
+            new_event(
+                event_type,
+                state.run_id,
+                data,
+                identity=self._identity(state),
+            )
+        )
 
     async def emit_status(self, state: RunState, value: str) -> None:
         await self.emit_event(state, "status.changed", {"value": value})
@@ -76,6 +99,47 @@ class ActivityContext:
         if not self._allowed_tools_provider:
             return []
         return list(self._allowed_tools_provider(state))
+
+    async def enter_degraded_mode(self, state: RunState, reason: str) -> None:
+        """Mark the run as degraded and emit a signal."""
+        if state.mark_degraded(reason):
+            identity = self._identity(state)
+            await self.bus.publish(
+                degraded_mode_event(
+                    state.run_id,
+                    reason=reason,
+                    metadata={"reason": reason},
+                    identity=identity,
+                )
+            )
+
+    async def record_model_cost(self, state: RunState, amount_usd: float) -> None:
+        """Record model spend and enforce per-run budgets."""
+        if amount_usd <= 0:
+            return
+        try:
+            if self.budget_manager:
+                total = self.budget_manager.record(state.run_id, amount_usd)
+                state.record_model_cost(amount_usd)
+            else:
+                state.record_model_cost(amount_usd)
+        except BudgetExceeded as exc:
+            state.record_model_cost(amount_usd)
+            await self.bus.publish(
+                rate_limit_exceeded_event(
+                    state.run_id,
+                    scope="model_budget",
+                    reason="budget_exhausted",
+                    metadata={
+                        "limit_usd": exc.limit_usd,
+                        "spent_usd": exc.spent_usd,
+                    },
+                    identity=self._identity(state),
+                )
+            )
+            raise
+        else:
+            state.record_model_cost(amount_usd)
 
     def set_active_workflow_span(self, run_id: str, span_id: str | None) -> None:
         """Mark the workflow span used as parent for node spans."""

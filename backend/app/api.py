@@ -12,13 +12,15 @@ from fastapi import APIRouter, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
+from .cache import CacheStore
 from .coordinator import RunCoordinator
-from .events import EventBus, EventStore, sse_event_stream
+from .events import EventBus, EventStore, rate_limit_exceeded_event, sse_event_stream
 from .guardrails.context_sanitizer import ContextSanitizer
 from .guardrails.input_gate import InputGate
 from .guardrails.injection_detector import InjectionDetector
 from .guardrails.output_validator import OutputValidator
 from .ingestion import EmbeddingGenerator
+from .intelligence.utils import configure_state_store, log_run
 from .mcp.client import MCPClient
 from .mcp.registry import MCPRegistry
 from .permissions import PermissionGate
@@ -32,6 +34,8 @@ from .observability.tracer import Tracer
 from .observability.api import configure_trace_api, router as observability_router
 from .settings import settings
 from .workflow import ActivityContext, WorkflowEngine, WorkflowStore, build_activity_map
+from .limits.rate_limiter import RateLimiter
+from .limits.budget import BudgetManager
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -47,6 +51,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 EVENT_STORE = EventStore(EVENTS_DIR)
 EVENT_BUS = EventBus(EVENT_STORE)
 STATE_STORE = StateStore(STATE_DIR)
+configure_state_store(STATE_STORE)
 EMBEDDING_GENERATOR = EmbeddingGenerator()
 RETRIEVAL_STORE = InMemoryRetrievalStore(EMBEDDING_GENERATOR.embed)
 configure_retrieval_store(RETRIEVAL_STORE)
@@ -56,6 +61,11 @@ MCP_CLIENT = MCPClient(MCP_REGISTRY)
 WORKFLOW_STORE = WorkflowStore(WORKFLOW_DIR)
 TRACE_STORE = TraceStore(TRACE_DIR)
 TRACER = Tracer(TRACE_STORE)
+CACHE_STORE = CacheStore()
+RATE_LIMITER = RateLimiter(
+    settings.limits.global_concurrency, settings.limits.tenant_concurrency
+)
+BUDGET_MANAGER = BudgetManager(settings.limits.model_budget_usd)
 configure_trace_api(TRACE_STORE)
 router.include_router(observability_router)
 INPUT_GATE = (
@@ -117,6 +127,9 @@ ACTIVITY_CONTEXT = ActivityContext(
     context_sanitizer=CONTEXT_SANITIZER,
     output_validator=OUTPUT_VALIDATOR,
     injection_detector=INJECTION_DETECTOR,
+    cache_store=CACHE_STORE,
+    retrieval_cache_enabled=settings.caching.retrieval_cache_enabled,
+    budget_manager=BUDGET_MANAGER,
 )
 ACTIVITY_MAP = build_activity_map(ACTIVITY_CONTEXT)
 WORKFLOW_ENGINE = WorkflowEngine(
@@ -133,6 +146,8 @@ RUN_COORDINATOR = RunCoordinator(
     WORKFLOW_ENGINE,
     ACTIVITY_CONTEXT,
     TRACER,
+    rate_limiter=RATE_LIMITER,
+    budget_manager=BUDGET_MANAGER,
     input_gate=INPUT_GATE,
     injection_detector=INJECTION_DETECTOR,
 )
@@ -155,13 +170,32 @@ async def create_run(
     """Start a new run and return immediately."""
     run_id = x_run_id or str(uuid.uuid4())
     context_length = len(payload.context or "")
+    tenant_id = payload.identity.tenant_id if payload.identity else "default"
+    user_id = payload.identity.user_id if payload.identity else "anonymous"
+    identity = {"tenant_id": tenant_id, "user_id": user_id}
+    if not RATE_LIMITER.try_acquire(run_id, tenant_id):
+        await EVENT_BUS.publish(
+            rate_limit_exceeded_event(
+                run_id,
+                scope="run_start",
+                reason="concurrency_limit",
+                metadata={"tenant_id": tenant_id},
+                identity=identity,
+            )
+        )
+        return JSONResponse(
+            {"ok": False, "reason": "rate_limited"},
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        )
     _log(
-        "run request mode=%s message_length=%s context_length=%s client=%s",
+        "run request mode=%s message_length=%s context_length=%s client=%s tenant=%s user=%s",
         run_id,
         payload.mode.value,
         len(payload.message),
         context_length,
         request.client.host if request.client else "unknown",
+        tenant_id,
+        user_id,
     )
 
     state = RunState.new(
@@ -169,9 +203,17 @@ async def create_run(
         message=payload.message,
         context=payload.context,
         mode=payload.mode,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        cost_limit_usd=settings.limits.model_budget_usd or None,
     )
 
-    await RUN_COORDINATOR.start_run(state)
+    try:
+        await RUN_COORDINATOR.start_run(state)
+    except Exception:
+        RATE_LIMITER.release(run_id)
+        BUDGET_MANAGER.reset(run_id)
+        raise
     return JSONResponse({"ok": True, "run_id": run_id})
 
 

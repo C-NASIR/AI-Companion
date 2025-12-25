@@ -8,9 +8,12 @@ import time
 from collections import defaultdict
 from typing import Callable, Mapping
 
+from .cache import CacheStore
 from .events import (
     Event,
     EventBus,
+    cache_hit_event,
+    cache_miss_event,
     guardrail_triggered_event,
     tool_completed_event,
     tool_denied_event,
@@ -41,6 +44,8 @@ class ToolExecutor:
         tracer: Tracer | None = None,
         *,
         tool_firewall_enabled: bool = True,
+        cache_store: CacheStore | None = None,
+        tool_cache_enabled: bool = True,
     ):
         self.bus = bus
         self.registry = registry
@@ -54,6 +59,8 @@ class ToolExecutor:
         self._tool_counts: dict[str, int] = defaultdict(int)
         self._max_tools_per_run = 3
         self._tool_firewall_enabled = tool_firewall_enabled
+        self.cache_store = cache_store
+        self.tool_cache_enabled = tool_cache_enabled
 
     async def start(self) -> None:
         if self._task:
@@ -100,6 +107,12 @@ class ToolExecutor:
         normalized_name = tool_name.strip() if isinstance(tool_name, str) else "unknown"
         span_id = self._start_tool_span(run_id, normalized_name, parent_span_id)
 
+        state = self.state_store.load(run_id)
+        log_extra = state.log_extra() if state else {"run_id": run_id}
+        tenant_id = state.tenant_id if state else "default"
+        user_id = state.user_id if state else "anonymous"
+        identity = {"tenant_id": tenant_id, "user_id": user_id}
+
         if not isinstance(tool_name, str) or not tool_name.strip():
             resolved_name = tool_name if isinstance(tool_name, str) and tool_name else "unknown"
             await self._emit_failure(
@@ -107,6 +120,8 @@ class ToolExecutor:
                 resolved_name,
                 {"error": "invalid_tool_name"},
                 duration_ms=0,
+                identity=identity,
+                log_extra=log_extra,
             )
             self._end_tool_span(
                 run_id,
@@ -124,6 +139,8 @@ class ToolExecutor:
                 tool_name,
                 {"error": "invalid_arguments"},
                 duration_ms=0,
+                identity=identity,
+                log_extra=log_extra,
             )
             self._end_tool_span(
                 run_id,
@@ -140,6 +157,8 @@ class ToolExecutor:
                 tool_name,
                 {"error": "unknown_tool"},
                 duration_ms=0,
+                identity=identity,
+                log_extra=log_extra,
             )
             self._end_tool_span(
                 run_id,
@@ -149,7 +168,6 @@ class ToolExecutor:
             )
             return
 
-        state = self.state_store.load(run_id) if self._tool_firewall_enabled else None
         if self._tool_firewall_enabled and state and state.available_tools:
             allowed = {entry.name for entry in state.available_tools}
             if tool_name not in allowed:
@@ -158,6 +176,8 @@ class ToolExecutor:
                     tool_name,
                     descriptor.permission_scope,
                     "tool_not_allowlisted",
+                    identity=identity,
+                    log_extra=log_extra,
                 )
                 self._end_tool_span(
                     run_id,
@@ -181,6 +201,8 @@ class ToolExecutor:
                     tool_name,
                     descriptor.permission_scope,
                     arg_reason,
+                    identity=identity,
+                    log_extra=log_extra,
                 )
                 self._end_tool_span(
                     run_id,
@@ -199,6 +221,8 @@ class ToolExecutor:
                     tool_name,
                     descriptor.permission_scope,
                     "tool_rate_limit_exceeded",
+                    identity=identity,
+                    log_extra=log_extra,
                 )
                 self._end_tool_span(
                     run_id,
@@ -212,16 +236,7 @@ class ToolExecutor:
                 return
             self._tool_counts[run_id] += 1
 
-        self._annotate_tool_span(
-            run_id,
-            span_id,
-            {
-                "tool_name": descriptor.name,
-                "source": descriptor.source,
-                "permission_scope": descriptor.permission_scope,
-                "side_effect": self._classify_side_effect(descriptor.permission_scope),
-            },
-        )
+        side_effect = self._classify_side_effect(descriptor.permission_scope)
         permission_context = self._permission_context_for_run(run_id)
         allowed, reason = self.permission_gate.is_allowed(
             descriptor.permission_scope, permission_context
@@ -233,6 +248,8 @@ class ToolExecutor:
                     tool_name,
                     descriptor.permission_scope,
                     reason or "permission_denied",
+                    identity=identity,
+                    log_extra=log_extra,
                 )
             else:
                 await self._emit_denied(
@@ -240,6 +257,8 @@ class ToolExecutor:
                     tool_name,
                     descriptor.permission_scope,
                     reason or "permission_denied",
+                    identity=identity,
+                    log_extra=log_extra,
                 )
             self._end_tool_span(
                 run_id,
@@ -247,6 +266,69 @@ class ToolExecutor:
                 "failed",
                 {"error_type": "permission_denied", "reason": reason or "permission_denied"},
             )
+            return
+
+        cache_status = "disabled"
+        cached_output: Mapping[str, object] | None = None
+        cache_key: str | None = None
+        cache_metadata = {
+            "tool_name": tool_name,
+            "permission_scope": descriptor.permission_scope,
+            "source": descriptor.source,
+            "tenant_id": tenant_id,
+        }
+        cacheable = (
+            self.cache_store is not None
+            and self.tool_cache_enabled
+            and side_effect == "read"
+        )
+        if cacheable:
+            cache_key, cached_output = self.cache_store.tool_lookup(
+                tenant_id, tool_name, arguments
+            )
+            if cached_output is not None:
+                cache_status = "hit"
+                await self.bus.publish(
+                    cache_hit_event(
+                        run_id,
+                        cache_name="tool_result",
+                        key=cache_key,
+                        metadata=cache_metadata,
+                        identity=identity,
+                    )
+                )
+            else:
+                cache_status = "miss"
+                await self.bus.publish(
+                    cache_miss_event(
+                        run_id,
+                        cache_name="tool_result",
+                        key=cache_key,
+                        metadata=cache_metadata,
+                        identity=identity,
+                    )
+                )
+        self._annotate_tool_span(
+            run_id,
+            span_id,
+            {
+                "tool_name": descriptor.name,
+                "source": descriptor.source,
+                "permission_scope": descriptor.permission_scope,
+                "side_effect": side_effect,
+                "cache_status": cache_status,
+            },
+        )
+        if cached_output is not None:
+            await self._emit_success(
+                run_id,
+                tool_name,
+                cached_output,
+                duration_ms=0,
+                identity=identity,
+                log_extra=log_extra,
+            )
+            self._end_tool_span(run_id, span_id, "success")
             return
 
         start = time.perf_counter()
@@ -258,6 +340,7 @@ class ToolExecutor:
                     run_id,
                     server_id=descriptor.server_id,
                     error=exc.details or {"error": str(exc)},
+                    identity=identity,
                 )
             )
             await self._emit_failure(
@@ -265,6 +348,8 @@ class ToolExecutor:
                 tool_name,
                 {"error": "server_error"},
                 duration_ms=self._duration_ms(start),
+                identity=identity,
+                log_extra=log_extra,
             )
             self._end_tool_span(
                 run_id,
@@ -276,18 +361,25 @@ class ToolExecutor:
                 },
             )
             logger.warning(
-                "tool server error tool=%s server=%s", tool_name, descriptor.server_id, extra={"run_id": run_id}
+                "tool server error tool=%s server=%s",
+                tool_name,
+                descriptor.server_id,
+                extra=log_extra,
             )
             return
         except Exception:  # pragma: no cover - defensive guard
             logger.exception(
-                "tool execution crashed tool=%s", tool_name, extra={"run_id": run_id}
+                "tool execution crashed tool=%s",
+                tool_name,
+                extra=log_extra,
             )
             await self._emit_failure(
                 run_id,
                 tool_name,
                 {"error": "execution_error"},
                 duration_ms=self._duration_ms(start),
+                identity=identity,
+                log_extra=log_extra,
             )
             self._end_tool_span(
                 run_id,
@@ -303,6 +395,8 @@ class ToolExecutor:
                 tool_name,
                 result.error,
                 duration_ms=self._duration_ms(start),
+                identity=identity,
+                log_extra=log_extra,
             )
             self._end_tool_span(
                 run_id,
@@ -317,7 +411,11 @@ class ToolExecutor:
             tool_name,
             result.output or {},
             duration_ms=self._duration_ms(start),
+            identity=identity,
+            log_extra=log_extra,
         )
+        if cacheable and cache_key:
+            self.cache_store.store_tool(tenant_id, tool_name, arguments, result.output or {})
         self._end_tool_span(run_id, span_id, "success")
 
     async def _emit_success(
@@ -327,17 +425,23 @@ class ToolExecutor:
         output: Mapping[str, object],
         *,
         duration_ms: int,
+        identity: Mapping[str, Any],
+        log_extra: Mapping[str, str],
     ) -> None:
         await self.bus.publish(
             tool_completed_event(
-                run_id, tool_name=tool_name, output=dict(output), duration_ms=duration_ms
+                run_id,
+                tool_name=tool_name,
+                output=dict(output),
+                duration_ms=duration_ms,
+                identity=identity,
             )
         )
         logger.info(
             "tool completed tool=%s duration_ms=%s",
             tool_name,
             duration_ms,
-            extra={"run_id": run_id},
+            extra=log_extra,
         )
 
     async def _emit_failure(
@@ -347,21 +451,34 @@ class ToolExecutor:
         error: Mapping[str, object],
         *,
         duration_ms: int,
+        identity: Mapping[str, Any],
+        log_extra: Mapping[str, str],
     ) -> None:
         await self.bus.publish(
             tool_failed_event(
-                run_id, tool_name=tool_name, error=dict(error), duration_ms=duration_ms
+                run_id,
+                tool_name=tool_name,
+                error=dict(error),
+                duration_ms=duration_ms,
+                identity=identity,
             )
         )
         logger.info(
             "tool failed tool=%s duration_ms=%s",
             tool_name,
             duration_ms,
-            extra={"run_id": run_id},
+            extra=log_extra,
         )
 
     async def _emit_denied(
-        self, run_id: str, tool_name: str, permission_scope: str, reason: str
+        self,
+        run_id: str,
+        tool_name: str,
+        permission_scope: str,
+        reason: str,
+        *,
+        identity: Mapping[str, Any],
+        log_extra: Mapping[str, str],
     ) -> None:
         await self.bus.publish(
             tool_denied_event(
@@ -369,6 +486,7 @@ class ToolExecutor:
                 tool_name=tool_name,
                 permission_scope=permission_scope,
                 reason=reason,
+                identity=identity,
             )
         )
         logger.warning(
@@ -376,7 +494,7 @@ class ToolExecutor:
             tool_name,
             permission_scope,
             reason,
-            extra={"run_id": run_id},
+            extra=log_extra,
         )
 
     def _permission_context_for_run(self, run_id: str):
@@ -439,6 +557,9 @@ class ToolExecutor:
         tool_name: str,
         permission_scope: str,
         reason: str,
+        *,
+        identity: Mapping[str, Any],
+        log_extra: Mapping[str, str],
     ) -> None:
         assessment = ThreatAssessment(
             threat_type=ThreatType.TOOL_ABUSE,
@@ -450,9 +571,17 @@ class ToolExecutor:
                 run_id,
                 layer="tool",
                 assessment=assessment,
+                identity=identity,
             )
         )
-        await self._emit_denied(run_id, tool_name, permission_scope, reason)
+        await self._emit_denied(
+            run_id,
+            tool_name,
+            permission_scope,
+            reason,
+            identity=identity,
+            log_extra=log_extra,
+        )
 
     @staticmethod
     def _classify_side_effect(permission_scope: str) -> str:

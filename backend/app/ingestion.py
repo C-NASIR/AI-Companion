@@ -14,6 +14,7 @@ from typing import Callable, Iterable
 from openai import OpenAI
 
 from .events import EventBus, new_event
+from .knowledge import set_corpus_version
 from .model import OPENAI_API_KEY, OPENAI_BASE_URL
 from .retrieval import ChunkEmbedding, RetrievalStore
 
@@ -173,8 +174,17 @@ class KnowledgeIngestion:
             )
         return chunks
 
-    def ingest(self) -> dict[str, int]:
+    def _compute_corpus_version(self, documents: list[SourceDocument]) -> str:
+        hasher = hashlib.sha256()
+        for document in documents:
+            hasher.update(document.document_id.encode("utf-8"))
+            hasher.update(hashlib.sha256(document.text.encode("utf-8")).digest())
+        digest = hasher.hexdigest()
+        return digest or "empty"
+
+    def ingest(self) -> dict[str, int | str]:
         documents = self._load_documents()
+        corpus_version = self._compute_corpus_version(documents)
         total_chunks = 0
         for document in documents:
             chunks = self._chunk_document(document)
@@ -192,7 +202,12 @@ class KnowledgeIngestion:
             total_chunks,
             extra={"run_id": KNOWLEDGE_RUN_ID},
         )
-        return {"documents_ingested": len(documents), "chunks_indexed": total_chunks}
+        set_corpus_version(corpus_version)
+        return {
+            "documents_ingested": len(documents),
+            "chunks_indexed": total_chunks,
+            "corpus_version": corpus_version,
+        }
 
 
 async def run_ingestion(

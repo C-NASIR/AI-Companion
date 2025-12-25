@@ -76,10 +76,19 @@ export interface ApprovalState {
   error: string | null;
 }
 
+export interface OperationalAlert {
+  type: "rate_limit" | "budget" | "degraded" | "system";
+  title: string;
+  message: string;
+  ts: string;
+}
+
 interface UseChatRunArgs {
   message: string;
   context: string;
   mode: ChatMode;
+  tenantId: string;
+  userId: string;
 }
 
 const ACTIVE_RUN_STORAGE_KEY = "ai_companion_active_run";
@@ -237,7 +246,13 @@ const buildSpanAlerts = (spans: SpanRecord[]): SpanAlert[] => {
   return alerts;
 };
 
-export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
+export const useChatRun = ({
+  message,
+  context,
+  mode,
+  tenantId,
+  userId,
+}: UseChatRunArgs) => {
   const [statusValue, setStatusValue] = useState<StatusValue | null>(null);
   const [steps, setSteps] = useState<StepStateMap>(() => createInitialSteps());
   const [output, setOutput] = useState("");
@@ -290,6 +305,11 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
   const [injectionSignals, setInjectionSignals] = useState<
     InjectionSignalEntry[]
   >([]);
+  const [operationalAlerts, setOperationalAlerts] = useState<OperationalAlert[]>(
+    []
+  );
+  const [degradedReason, setDegradedReason] = useState<string | null>(null);
+  const [budgetStatus, setBudgetStatus] = useState<"ok" | "exhausted">("ok");
 
   const [formError, setFormError] = useState<string | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
@@ -303,6 +323,18 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
   const outputRef = useRef("");
 
   const statusDisplay: StatusDisplay = useMemo(() => {
+    if (budgetStatus === "exhausted") {
+      return {
+        label: "Budget exhausted",
+        hint: "This run stopped after hitting its model spend limit.",
+      };
+    }
+    if (degradedReason) {
+      return {
+        label: "Degraded mode",
+        hint: degradedReason,
+      };
+    }
     if (guardrailSummary?.status === "refused") {
       return {
         label: "Request refused",
@@ -317,6 +349,13 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
         hint:
           guardrailSummary.reason ??
           `Execution stopped at the ${guardrailSummary.layer ?? "safety"} layer.`,
+      };
+    }
+    if (operationalAlerts.length > 0) {
+      const latest = operationalAlerts[operationalAlerts.length - 1];
+      return {
+        label: latest.title,
+        hint: latest.message,
       };
     }
     if (spanAlerts.length > 0) {
@@ -387,6 +426,9 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
     toolContext.toolSource,
     workflowRetryInfo,
     workflowWaitingInfo,
+    operationalAlerts,
+    degradedReason,
+    budgetStatus,
   ]);
 
   const orderedSteps = useMemo(
@@ -450,6 +492,9 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
     setGuardrailEvents([]);
     setSanitizedContext([]);
     setInjectionSignals([]);
+    setOperationalAlerts([]);
+    setDegradedReason(null);
+    setBudgetStatus("ok");
     lastSeqRef.current = 0;
   }, []);
 
@@ -697,6 +742,48 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
         } else {
           setWorkflowStatus("running");
         }
+        break;
+      }
+
+      case "rate.limit.exceeded": {
+        const scope =
+          typeof event.data?.scope === "string"
+            ? event.data.scope
+            : "unknown";
+        const alert: OperationalAlert = {
+          type: scope === "model_budget" ? "budget" : "rate_limit",
+          title:
+            scope === "model_budget"
+              ? "Budget exhausted"
+              : "Rate limit reached",
+          message:
+            scope === "model_budget"
+              ? "Model spend limit was reached. The run will halt."
+              : "Run throughput exceeded the configured limit. Please retry shortly.",
+          ts: event.ts,
+        };
+        setOperationalAlerts((prev) => [...prev, alert]);
+        if (scope === "model_budget") {
+          setBudgetStatus("exhausted");
+        }
+        break;
+      }
+
+      case "degraded.mode.entered": {
+        const reason =
+          typeof event.data?.reason === "string"
+            ? event.data.reason
+            : "Operating in degraded mode.";
+        setDegradedReason(reason);
+        setOperationalAlerts((prev) => [
+          ...prev,
+          {
+            type: "degraded",
+            title: "Degraded mode",
+            message: reason,
+            ts: event.ts,
+          },
+        ]);
         break;
       }
 
@@ -1005,6 +1092,21 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
               threatType: payload.guardrail_threat_type ?? null,
             });
           }
+          if (payload.degraded) {
+            setDegradedReason(
+              typeof payload.degraded_reason === "string"
+                ? payload.degraded_reason
+                : "Operating in degraded mode."
+            );
+          }
+          if (
+            typeof payload.cost_limit_usd === "number" &&
+            typeof payload.cost_spent_usd === "number" &&
+            payload.cost_limit_usd > 0 &&
+            payload.cost_spent_usd >= payload.cost_limit_usd
+          ) {
+            setBudgetStatus("exhausted");
+          }
         }
       })
       .catch(() => {
@@ -1103,6 +1205,10 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
           message: trimmedMessage,
           mode,
           ...(trimmedContext ? { context: trimmedContext } : {}),
+          identity: {
+            tenant_id: tenantId.trim() || "default",
+            user_id: userId.trim() || "anonymous",
+          },
         },
         runId
       );
@@ -1119,12 +1225,28 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
       connectToRunEvents(resolvedRunId);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      setRunError(msg);
+      if (msg === "rate_limited") {
+        setOperationalAlerts((prev) => [
+          ...prev,
+          {
+            type: "rate_limit",
+            title: "Rate limit reached",
+            message:
+              "Concurrency is capped for this tenant. Retry in a few seconds or reduce outstanding runs.",
+            ts: new Date().toISOString(),
+          },
+        ]);
+        setRunError(
+          "This tenant hit the concurrency limit. Please retry in a few seconds or reduce parallel runs."
+        );
+      } else {
+        setRunError(msg);
+      }
       setIsStreaming(false);
     } finally {
       // keep streaming state controlled by events
     }
-  }, [connectToRunEvents, context, message, mode, resetRunView]);
+  }, [connectToRunEvents, context, message, mode, resetRunView, tenantId, userId]);
 
   const handleApprovalDecision = useCallback(
     async (decision: ApprovalDecision) => {
@@ -1194,6 +1316,7 @@ export const useChatRun = ({ message, context, mode }: UseChatRunArgs) => {
     runOutcomeReason,
     statusDisplay,
     spanAlerts,
+    operationalAlerts,
     guardrailSummary,
     guardrailEvents,
     sanitizedContext,

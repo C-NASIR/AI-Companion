@@ -25,6 +25,7 @@ trap cleanup EXIT
 trap 'forward_signal TERM' TERM
 trap 'forward_signal INT' INT
 
+python -m app.startup_checks
 reset_data_dir
 
 "$@" &

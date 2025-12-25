@@ -32,7 +32,11 @@ export type RunEventType =
   | "workflow.failed"
   | "guardrail.triggered"
   | "context.sanitized"
-  | "injection.detected";
+  | "injection.detected"
+  | "rate.limit.exceeded"
+  | "degraded.mode.entered"
+  | "cache.hit"
+  | "cache.miss";
 
 export interface RunEvent {
   id: string;
@@ -57,6 +61,10 @@ export interface ChatPayload {
   message: string;
   context?: string;
   mode: ChatMode;
+  identity?: {
+    tenant_id: string;
+    user_id: string;
+  };
 }
 
 export interface FeedbackPayload {
@@ -80,7 +88,16 @@ export function getBackendUrl(): string {
     return resolveContainerHost(normalized);
   }
   if (typeof window !== "undefined") {
-    return `${window.location.protocol}//${window.location.hostname}:8000`;
+    const devPorts = new Set(["3000", "4173", "5173"]);
+    const { protocol, hostname, port } = window.location;
+    const resolvedPort =
+      !port || port === "" || port === "80" || port === "443"
+        ? ""
+        : devPorts.has(port)
+        ? "8000"
+        : port;
+    const portSuffix = resolvedPort ? `:${resolvedPort}` : "";
+    return `${protocol}//${hostname}${portSuffix}`;
   }
   return DEFAULT_BACKEND_URL;
 }
@@ -104,6 +121,16 @@ function resolveContainerHost(url: string): string {
   }
 }
 
+function backendFetch(
+  url: string,
+  init?: RequestInit
+): Promise<Response> {
+  return fetch(url, {
+    ...init,
+    referrerPolicy: init?.referrerPolicy ?? "no-referrer",
+  });
+}
+
 export async function startRunRequest(
   payload: ChatPayload,
   runId: string
@@ -115,8 +142,14 @@ export async function startRunRequest(
   if (payload.context && payload.context.trim().length > 0) {
     body.context = payload.context;
   }
+  if (payload.identity) {
+    body.identity = {
+      tenant_id: payload.identity.tenant_id,
+      user_id: payload.identity.user_id,
+    };
+  }
 
-  const response = await fetch(`${getBackendUrl()}/runs`, {
+  const response = await backendFetch(`${getBackendUrl()}/runs`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -126,7 +159,19 @@ export async function startRunRequest(
   });
 
   if (!response.ok) {
-    throw new Error(`Backend error: ${response.status}`);
+    let reason: string | null = null;
+    try {
+      const detail = (await response.json()) as { reason?: string } | null;
+      if (detail && typeof detail.reason === "string") {
+        reason = detail.reason;
+      }
+    } catch {
+      // ignore parse failure
+    }
+    if (response.status === 429) {
+      throw new Error(reason ?? "rate_limited");
+    }
+    throw new Error(reason ?? `Backend error: ${response.status}`);
   }
 
   const payloadJson = (await response.json().catch(() => null)) as
@@ -136,7 +181,7 @@ export async function startRunRequest(
 }
 
 export async function submitFeedback(payload: FeedbackPayload): Promise<void> {
-  const response = await fetch(`${getBackendUrl()}/feedback`, {
+  const response = await backendFetch(`${getBackendUrl()}/feedback`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -209,6 +254,10 @@ export interface RunStatePayload {
   guardrail_layer?: string | null;
   guardrail_threat_type?: string | null;
   updated_at?: string | null;
+  degraded?: boolean;
+  degraded_reason?: string | null;
+  cost_spent_usd?: number | null;
+  cost_limit_usd?: number | null;
 }
 
 export interface WorkflowStatePayload {
@@ -261,7 +310,7 @@ export interface TracePayload {
 export async function fetchRunState(
   runId: string
 ): Promise<RunStatePayload | null> {
-  const response = await fetch(`${getBackendUrl()}/runs/${runId}/state`, {
+  const response = await backendFetch(`${getBackendUrl()}/runs/${runId}/state`, {
     method: "GET",
   });
   if (response.status === 404) {
@@ -277,7 +326,7 @@ export async function fetchRunState(
 export async function fetchWorkflowState(
   runId: string
 ): Promise<WorkflowStatePayload | null> {
-  const response = await fetch(`${getBackendUrl()}/runs/${runId}/workflow`, {
+  const response = await backendFetch(`${getBackendUrl()}/runs/${runId}/workflow`, {
     method: "GET",
   });
   if (response.status === 404) {
@@ -294,7 +343,7 @@ export async function submitApprovalDecisionRequest(
   runId: string,
   decision: ApprovalDecision
 ): Promise<void> {
-  const response = await fetch(`${getBackendUrl()}/runs/${runId}/approval`, {
+  const response = await backendFetch(`${getBackendUrl()}/runs/${runId}/approval`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -310,7 +359,7 @@ export async function submitApprovalDecisionRequest(
 }
 
 async function fetchJsonOrNull<T>(url: string): Promise<T | null> {
-  const response = await fetch(url);
+  const response = await backendFetch(url);
   if (response.status === 404) {
     return null;
   }

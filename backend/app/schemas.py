@@ -18,6 +18,13 @@ class ChatMode(str, Enum):
     SUMMARIZE = "summarize"
 
 
+class ChatIdentity(BaseModel):
+    """Identity metadata provided by the caller."""
+
+    tenant_id: str = Field(..., min_length=1, description="Tenant identifier")
+    user_id: str = Field(..., min_length=1, description="User identifier")
+
+
 class ChatRequest(BaseModel):
     """Structured request body for POST /chat."""
 
@@ -26,6 +33,10 @@ class ChatRequest(BaseModel):
         default=None, description="Optional supporting information"
     )
     mode: ChatMode = Field(default=ChatMode.ANSWER, description="Execution mode")
+    identity: ChatIdentity | None = Field(
+        default=None,
+        description="Optional tenant/user identity metadata",
+    )
 
 
 EventType = Literal["status", "step", "output", "error", "done", "node", "decision"]

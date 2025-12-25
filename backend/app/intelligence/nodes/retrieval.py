@@ -22,7 +22,10 @@ async def retrieve_node(state: RunState, ctx: NodeContext) -> RunState:
     """Fetch supporting evidence."""
     async with ctx.node_scope(state, "retrieve", RunPhase.RETRIEVE):
         query = _build_retrieval_query(state)
-        await ctx.bus.publish(retrieval_started_event(state.run_id, query))
+        identity = {"tenant_id": state.tenant_id, "user_id": state.user_id}
+        await ctx.bus.publish(
+            retrieval_started_event(state.run_id, query, identity=identity)
+        )
         log_run(
             state.run_id,
             "retrieval querying top_k=%s query_length=%s",
@@ -38,7 +41,9 @@ async def retrieve_node(state: RunState, ctx: NodeContext) -> RunState:
             raise
         state.set_retrieved_chunks(chunks)
         chunk_ids = [chunk.chunk_id for chunk in chunks]
-        await ctx.bus.publish(retrieval_completed_event(state.run_id, chunk_ids))
+        await ctx.bus.publish(
+            retrieval_completed_event(state.run_id, chunk_ids, identity=identity)
+        )
         decision_value = str(len(chunk_ids))
         notes = f"{decision_value} chunk(s) retrieved"
         state.record_decision("retrieval_chunks", decision_value, notes=notes)

@@ -6,6 +6,7 @@ import asyncio
 from typing import Any, Mapping, Sequence
 
 from ...model import stream_chat
+from ...models import ModelCapability
 from ...state import PlanType, RunPhase, RunState
 from ..context import NodeContext
 from ..utils import log_run
@@ -24,6 +25,7 @@ async def _stream_direct_answer(
         state.run_id,
         retrieved_chunks,
         is_evaluation=state.is_evaluation,
+        capability=ModelCapability.GENERATION,
     ):
         if first_chunk:
             await ctx.emit_status(state, "responding")
