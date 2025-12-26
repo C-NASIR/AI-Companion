@@ -227,6 +227,7 @@ def tool_completed_event(
     tool_name: str,
     output: Mapping[str, Any],
     duration_ms: int,
+    identity: Mapping[str, Any] | None = None,
 ) -> Event:
     """Helper to build validated tool.completed events."""
     payload = ToolCompletedPayload(
@@ -385,6 +386,7 @@ def cost_aggregated_event(
     total_model_calls: int,
     total_input_tokens: int = 0,
     total_output_tokens: int = 0,
+    identity: Mapping[str, Any] | None = None,
 ) -> Event:
     """Emit cost.aggregated events for run-level accounting."""
     payload = CostAggregatedPayload(
@@ -402,6 +404,7 @@ def cache_hit_event(
     cache_name: Literal["retrieval", "tool_result"],
     key: str,
     metadata: Mapping[str, Any] | None = None,
+    identity: Mapping[str, Any] | None = None,
 ) -> Event:
     payload = CacheEventPayload(
         cache_name=cache_name,
@@ -417,6 +420,7 @@ def cache_miss_event(
     cache_name: Literal["retrieval", "tool_result"],
     key: str,
     metadata: Mapping[str, Any] | None = None,
+    identity: Mapping[str, Any] | None = None,
 ) -> Event:
     payload = CacheEventPayload(
         cache_name=cache_name,
