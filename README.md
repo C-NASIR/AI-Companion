@@ -72,7 +72,7 @@ cd backend
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:create_app --factory --reload --port 8000
 ```
 
 Frontend:
@@ -210,7 +210,7 @@ Session 7 replaces the transient coordinator loop with a workflow engine that pe
 
 ### Crash-test durability
 
-1. Start the backend (`uvicorn app.main:app --reload` or `docker compose up`) and kick off a run that streams for a few seconds (e.g., a question that triggers retrieval/respond).
+1. Start the backend (`uvicorn app.main:create_app --factory --reload` or `docker compose up`) and kick off a run that streams for a few seconds (e.g., a question that triggers retrieval/respond).
 2. Tail the workflow events: `tail -f backend/data/events/<run_id>.jsonl | rg workflow`.
 3. After you see `workflow.step.started` for `respond` or `retrieve`, kill the backend process (CTRL+C or `docker compose stop backend`).
 4. Restart the backend. On boot it reloads `RunState` + `WorkflowState`, observes pending steps, and emits `workflow.step.started` again without duplicating prior output/tool effects.

@@ -14,8 +14,12 @@ from .state import RunState
 class StateStore:
     """Persist RunState snapshots as JSON files."""
 
-    def __init__(self, base_dir: str | Path):
+    def __init__(self, base_dir: str | Path, *, ensure_dirs: bool = True):
         self.base_dir = Path(base_dir)
+        if ensure_dirs:
+            self.base_dir.mkdir(parents=True, exist_ok=True)
+
+    def ensure_base_dir(self) -> None:
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
     def _path(self, run_id: str) -> Path:
@@ -23,12 +27,14 @@ class StateStore:
 
     def save(self, state: RunState) -> None:
         """Serialize the provided state snapshot to disk."""
+        self.ensure_base_dir()
         path = self._path(state.run_id)
         with path.open("w", encoding="utf-8") as handle:
             json.dump(state.model_dump(), handle, ensure_ascii=False, indent=2)
 
     def load(self, run_id: str) -> Optional[RunState]:
         """Load the stored RunState or return None if missing/invalid."""
+        self.ensure_base_dir()
         path = self._path(run_id)
         if not path.exists():
             return None

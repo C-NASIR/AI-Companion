@@ -16,17 +16,29 @@ logger = logging.getLogger(__name__)
 class GuardrailMonitor:
     """Aggregates guardrail events for dashboards/alerts."""
 
-    def __init__(self, bus: EventBus, *, report_interval: int = 120) -> None:
+    def __init__(
+        self,
+        bus: EventBus,
+        *,
+        report_interval: int = 120,
+        subscribe: bool = True,
+    ) -> None:
         self.bus = bus
         self.report_interval = max(report_interval, 30)
-        self._unsubscribe: Callable[[], None] | None = self.bus.subscribe_all(
-            self._handle_event
-        )
+        self._unsubscribe: Callable[[], None] | None = None
+        if subscribe:
+            self._unsubscribe = self.bus.subscribe_all(self._handle_event)
         self._guardrail_counts: Counter[str] = Counter()
         self._sanitization_counts: Counter[str] = Counter()
         self._injection_counts: Counter[str] = Counter()
         self._last_report = time.monotonic()
         self._lock = asyncio.Lock()
+
+    def start(self) -> None:
+        """Begin consuming events from the bus (idempotent)."""
+        if self._unsubscribe:
+            return
+        self._unsubscribe = self.bus.subscribe_all(self._handle_event)
 
     async def _handle_event(self, event: Event) -> None:
         """Collect metrics and periodically log summaries."""

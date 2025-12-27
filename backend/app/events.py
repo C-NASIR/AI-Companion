@@ -463,11 +463,15 @@ def degraded_mode_event(
 class EventStore:
     """Append-only per-run event store backed by JSONL files."""
 
-    def __init__(self, base_dir: str | Path):
+    def __init__(self, base_dir: str | Path, *, ensure_dirs: bool = True):
         self.base_dir = Path(base_dir)
-        self.base_dir.mkdir(parents=True, exist_ok=True)
+        if ensure_dirs:
+            self.base_dir.mkdir(parents=True, exist_ok=True)
         self._seq_cache: dict[str, int] = {}
         self._lock = threading.Lock()
+
+    def ensure_base_dir(self) -> None:
+        self.base_dir.mkdir(parents=True, exist_ok=True)
 
     def _event_file(self, run_id: str) -> Path:
         return self.base_dir / f"{run_id}.jsonl"
@@ -502,6 +506,7 @@ class EventStore:
 
     def append(self, event: Event | Mapping[str, Any]) -> Event:
         """Assign a sequence number, persist, and return the stored event."""
+        self.ensure_base_dir()
         event_model = event if isinstance(event, Event) else Event.model_validate(event)
         with self._lock:
             event_model.seq = self._next_seq_locked(event_model.run_id)
@@ -516,6 +521,7 @@ class EventStore:
 
     def replay(self, run_id: str) -> list[Event]:
         """Return all stored events for a run in sequence order."""
+        self.ensure_base_dir()
         path = self._event_file(run_id)
         if not path.exists():
             return []

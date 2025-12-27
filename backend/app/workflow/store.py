@@ -14,8 +14,12 @@ from .models import WorkflowState
 class WorkflowStore:
     """Persist WorkflowState objects as JSON files."""
 
-    def __init__(self, base_dir: str | Path):
+    def __init__(self, base_dir: str | Path, *, ensure_dirs: bool = True):
         self.base_dir = Path(base_dir)
+        if ensure_dirs:
+            self.base_dir.mkdir(parents=True, exist_ok=True)
+
+    def ensure_base_dir(self) -> None:
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
     def _path(self, run_id: str) -> Path:
@@ -23,6 +27,7 @@ class WorkflowStore:
 
     def save(self, state: WorkflowState) -> WorkflowState:
         """Persist the provided workflow state snapshot."""
+        self.ensure_base_dir()
         path = self._path(state.run_id)
         with path.open("w", encoding="utf-8") as handle:
             json.dump(state.model_dump(), handle, ensure_ascii=False, indent=2)
@@ -30,6 +35,7 @@ class WorkflowStore:
 
     def load(self, run_id: str) -> WorkflowState | None:
         """Load a persisted workflow state if available."""
+        self.ensure_base_dir()
         path = self._path(run_id)
         if not path.exists():
             return None

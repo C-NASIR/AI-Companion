@@ -7,34 +7,42 @@ import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import AsyncGenerator, Mapping, Sequence
-
-from dotenv import find_dotenv, load_dotenv
 from openai import AsyncOpenAI
 
 from .schemas import ChatMode
 from .observability.costs import estimate_cost_usd
-from .models import ModelCapability, MODEL_ROUTER
+from .models import ModelCapability, get_model_router
 
-_DOTENV_PATH = find_dotenv(filename=".env", usecwd=True)
 
-if _DOTENV_PATH:
-    load_dotenv(dotenv_path=_DOTENV_PATH)
-else:
-    load_dotenv()
+def get_openai_api_key() -> str | None:
+    return os.getenv("OPENAI_API_KEY")
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
+
+def get_openai_base_url() -> str | None:
+    return os.getenv("OPENAI_BASE_URL")
+
+
+def load_environment() -> None:
+    """Explicitly load environment variables from .env (if available)."""
+
+    from .env import load_dotenv_if_present
+
+    load_dotenv_if_present()
+
+
 _client: AsyncOpenAI | None = None
 
 
 def _get_client() -> AsyncOpenAI:
-    if not OPENAI_API_KEY:
+    api_key = get_openai_api_key()
+    base_url = get_openai_base_url()
+    if not api_key:
         raise RuntimeError("OPENAI_API_KEY missing")
     global _client
     if _client is None:
-        client_kwargs = {"api_key": OPENAI_API_KEY}
-        if OPENAI_BASE_URL:
-            client_kwargs["base_url"] = OPENAI_BASE_URL
+        client_kwargs = {"api_key": api_key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
         _client = AsyncOpenAI(**client_kwargs)
     return _client
 
@@ -114,6 +122,7 @@ async def real_stream(
 ) -> AsyncGenerator[str, None]:
     """Stream completion chunks from OpenAI."""
     client = _get_client()
+    model_router = get_model_router()
     messages: list[dict[str, str]] = [
         {
             "role": "system",
@@ -138,7 +147,7 @@ async def real_stream(
         )
     messages.append({"role": "user", "content": message})
     completion_kwargs: dict[str, object] = {
-        "model": MODEL_ROUTER.route(capability),
+        "model": model_router.route(capability),
         "messages": messages,
         "stream": True,
     }
@@ -193,7 +202,7 @@ async def fake_stream(
     snippet = (message.strip() or "…")[:60]
     context_snippet = (context.strip() if context else "none provided")[:80]
     if metrics:
-        metrics.model_name = MODEL_ROUTER.route(capability)
+        metrics.model_name = model_router.route(capability)
         metrics.record_prompt_chars(len(message) + len(context or ""))
         chunk_chars = sum(len(str(_value_from_chunk(chunk, "text") or "")) for chunk in retrieved_chunks)
         metrics.record_prompt_chars(chunk_chars)
@@ -244,7 +253,7 @@ async def stream_chat(
 ) -> AsyncIterator[str]:
     """Dispatch to real or fake streamer."""
     evidence = retrieved_chunks or []
-    if OPENAI_API_KEY:
+    if get_openai_api_key():
         async for chunk in real_stream(
             message,
             context,

@@ -7,27 +7,20 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api import (
-    EMBEDDING_GENERATOR,
-    EVENT_BUS,
-    CACHE_STORE,
-    GUARDRAIL_MONITOR,
-    MCP_CLIENT,
-    MCP_REGISTRY,
-    PERMISSION_GATE,
-    RETRIEVAL_STORE,
-    RUN_COORDINATOR,
-    STATE_STORE,
-    TRACER,
-    router,
+from .api import get_router
+from .container import (
+    build_container,
+    shutdown as shutdown_container,
+    startup as startup_container,
+    wire_legacy_globals,
 )
 from .executor import ToolExecutor
 from .ingestion import run_ingestion
 from .events import tool_discovered_event
 from .mcp.servers.calculator_server import CalculatorMCPServer
 from .mcp.servers.github_server import GitHubMCPServer
-from .settings import settings
 from .startup_checks import run_startup_checks
+from .env import load_dotenv_if_present
 
 
 class _RunIdFilter(logging.Filter):
@@ -50,33 +43,15 @@ def _configure_logging() -> None:
         handler.addFilter(run_filter)
 
 
-_configure_logging()
-run_startup_checks()
-
-TOOL_EXECUTOR = ToolExecutor(
-    EVENT_BUS,
-    MCP_REGISTRY,
-    MCP_CLIENT,
-    PERMISSION_GATE,
-    STATE_STORE,
-    TRACER,
-    tool_firewall_enabled=settings.guardrails.tool_firewall_enabled,
-    cache_store=CACHE_STORE,
-    tool_cache_enabled=settings.caching.tool_cache_enabled,
-)
-_MCP_INITIALIZED = False
-
-
-async def _initialize_mcp() -> None:
-    global _MCP_INITIALIZED
-    if _MCP_INITIALIZED:
+async def _initialize_mcp(container) -> None:
+    if getattr(container, "_mcp_initialized", False):
         return
     servers = [CalculatorMCPServer(), GitHubMCPServer()]
     for server in servers:
-        MCP_CLIENT.register_server(server)
-    descriptors = await MCP_CLIENT.discover_tools()
+        container.mcp_client.register_server(server)
+    descriptors = await container.mcp_client.discover_tools()
     for descriptor in descriptors:
-        await EVENT_BUS.publish(
+        await container.event_bus.publish(
             tool_discovered_event(
                 "system",
                 tool_name=descriptor.name,
@@ -84,12 +59,35 @@ async def _initialize_mcp() -> None:
                 permission_scope=descriptor.permission_scope,
             )
         )
-    _MCP_INITIALIZED = True
+    container._mcp_initialized = True
 
 
 def create_app() -> FastAPI:
     """Construct the FastAPI application."""
+    _configure_logging()
+    load_dotenv_if_present()
+
+    from .settings import get_settings
+
+    settings = get_settings()
+
+    container = build_container(settings=settings)
+    wire_legacy_globals(container)
+
+    tool_executor = ToolExecutor(
+        container.event_bus,
+        container.mcp_registry,
+        container.mcp_client,
+        container.permission_gate,
+        container.state_store,
+        container.tracer,
+        tool_firewall_enabled=settings.guardrails.tool_firewall_enabled,
+        cache_store=container.cache_store,
+        tool_cache_enabled=settings.caching.tool_cache_enabled,
+    )
+
     app = FastAPI()
+    app.state.container = container
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -97,16 +95,18 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    app.include_router(router)
+    app.include_router(get_router(container))
 
     @app.on_event("startup")
     async def _startup() -> None:
-        await _initialize_mcp()
-        await TOOL_EXECUTOR.start()
+        run_startup_checks()
+        startup_container(container)
+        await _initialize_mcp(container)
+        await tool_executor.start()
         stats = await run_ingestion(
-            RETRIEVAL_STORE,
-            embedder=EMBEDDING_GENERATOR,
-            event_bus=EVENT_BUS,
+            container.retrieval_store,
+            embedder=container.embedding_generator,
+            event_bus=container.event_bus,
         )
         logger = logging.getLogger(__name__)
         logger.info(
@@ -118,9 +118,8 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
-        await TOOL_EXECUTOR.shutdown()
-        await RUN_COORDINATOR.shutdown()
-        GUARDRAIL_MONITOR.close()
+        await tool_executor.shutdown()
+        await shutdown_container(container)
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -129,4 +128,19 @@ def create_app() -> FastAPI:
     return app
 
 
-app = create_app()
+_APP: FastAPI | None = None
+
+
+def get_app() -> FastAPI:
+    """Legacy accessor for ASGI servers expecting an `app` variable."""
+
+    global _APP
+    if _APP is None:
+        _APP = create_app()
+    return _APP
+
+
+def __getattr__(name: str):  # pragma: no cover
+    if name == "app":
+        return get_app()
+    raise AttributeError(name)

@@ -1,156 +1,29 @@
-"""API router for Session 5 event-driven backend."""
+"""API router for Session 5 event-driven backend.
+
+This module is intentionally safe to import: it should not construct runtime
+singletons or perform filesystem/network side effects.
+"""
 
 from __future__ import annotations
 
 import json
 import logging
 import uuid
-from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from .cache import CacheStore
-from .coordinator import RunCoordinator
-from .events import EventBus, EventStore, rate_limit_exceeded_event, sse_event_stream
-from .guardrails.context_sanitizer import ContextSanitizer
-from .guardrails.input_gate import InputGate
-from .guardrails.injection_detector import InjectionDetector
-from .guardrails.output_validator import OutputValidator
-from .ingestion import EmbeddingGenerator
-from .intelligence.utils import configure_state_store, log_run
-from .mcp.client import MCPClient
-from .mcp.registry import MCPRegistry
-from .permissions import PermissionGate
-from .retrieval import InMemoryRetrievalStore, configure_retrieval_store
+from .events import rate_limit_exceeded_event, sse_event_stream
 from .schemas import ChatRequest, FeedbackRequest, iso_timestamp
+from .settings import get_settings
 from .state import RunState
-from .state_store import StateStore
-from .observability.guardrail_monitor import GuardrailMonitor
-from .observability.store import TraceStore
-from .observability.tracer import Tracer
-from .observability.api import configure_trace_api, router as observability_router
-from .settings import settings
-from .workflow import ActivityContext, WorkflowEngine, WorkflowStore, build_activity_map
-from .limits.rate_limiter import RateLimiter
-from .limits.budget import BudgetManager
 
-router = APIRouter()
+if TYPE_CHECKING:
+    from .container import BackendContainer
+
 logger = logging.getLogger(__name__)
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-FEEDBACK_FILE = DATA_DIR / "feedback.jsonl"
-EVENTS_DIR = DATA_DIR / "events"
-STATE_DIR = DATA_DIR / "state"
-WORKFLOW_DIR = DATA_DIR / "workflow"
-TRACE_DIR = DATA_DIR / "traces"
-
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-EVENT_STORE = EventStore(EVENTS_DIR)
-EVENT_BUS = EventBus(EVENT_STORE)
-STATE_STORE = StateStore(STATE_DIR)
-configure_state_store(STATE_STORE)
-EMBEDDING_GENERATOR = EmbeddingGenerator()
-RETRIEVAL_STORE = InMemoryRetrievalStore(EMBEDDING_GENERATOR.embed)
-configure_retrieval_store(RETRIEVAL_STORE)
-MCP_REGISTRY = MCPRegistry()
-PERMISSION_GATE = PermissionGate()
-MCP_CLIENT = MCPClient(MCP_REGISTRY)
-WORKFLOW_STORE = WorkflowStore(WORKFLOW_DIR)
-TRACE_STORE = TraceStore(TRACE_DIR)
-TRACER = Tracer(TRACE_STORE)
-CACHE_STORE = CacheStore()
-RATE_LIMITER = RateLimiter(
-    settings.limits.global_concurrency, settings.limits.tenant_concurrency
-)
-BUDGET_MANAGER = BudgetManager(settings.limits.model_budget_usd)
-configure_trace_api(TRACE_STORE)
-router.include_router(observability_router)
-INPUT_GATE = (
-    InputGate(EVENT_BUS) if settings.guardrails.input_gate_enabled else None
-)
-CONTEXT_SANITIZER = (
-    ContextSanitizer(EVENT_BUS)
-    if settings.guardrails.context_sanitizer_enabled
-    else None
-)
-OUTPUT_VALIDATOR = (
-    OutputValidator(EVENT_BUS)
-    if settings.guardrails.output_validator_enabled
-    else None
-)
-INJECTION_DETECTOR = (
-    InjectionDetector(EVENT_BUS)
-    if settings.guardrails.injection_detector_enabled
-    else None
-)
-GUARDRAIL_MONITOR = GuardrailMonitor(
-    EVENT_BUS, report_interval=settings.guardrails.monitor_report_seconds
-)
-_disabled_layers: list[str] = []
-if INPUT_GATE is None:
-    _disabled_layers.append("input")
-if CONTEXT_SANITIZER is None:
-    _disabled_layers.append("context")
-if OUTPUT_VALIDATOR is None:
-    _disabled_layers.append("output")
-if INJECTION_DETECTOR is None:
-    _disabled_layers.append("injection")
-if settings.guardrails.tool_firewall_enabled is False:
-    _disabled_layers.append("tool_firewall")
-if _disabled_layers:
-    logger.warning(
-        "guardrail layers disabled=%s", ",".join(_disabled_layers), extra={"run_id": "system"}
-    )
-
-
-def _allowed_tools_provider(state: RunState):
-    context = PERMISSION_GATE.build_context(
-        user_role="human",
-        run_type=state.mode.value,
-        is_evaluation=state.is_evaluation,
-    )
-    return PERMISSION_GATE.filter_allowed(
-        MCP_REGISTRY.list_tools(),
-        context,
-    )
-
-
-ACTIVITY_CONTEXT = ActivityContext(
-    EVENT_BUS,
-    STATE_STORE,
-    RETRIEVAL_STORE,
-    allowed_tools_provider=_allowed_tools_provider,
-    tracer=TRACER,
-    context_sanitizer=CONTEXT_SANITIZER,
-    output_validator=OUTPUT_VALIDATOR,
-    injection_detector=INJECTION_DETECTOR,
-    cache_store=CACHE_STORE,
-    retrieval_cache_enabled=settings.caching.retrieval_cache_enabled,
-    budget_manager=BUDGET_MANAGER,
-)
-ACTIVITY_MAP = build_activity_map(ACTIVITY_CONTEXT)
-WORKFLOW_ENGINE = WorkflowEngine(
-    EVENT_BUS,
-    WORKFLOW_STORE,
-    STATE_STORE,
-    activities=ACTIVITY_MAP,
-    activity_context=ACTIVITY_CONTEXT,
-    tracer=TRACER,
-)
-RUN_COORDINATOR = RunCoordinator(
-    EVENT_BUS,
-    STATE_STORE,
-    WORKFLOW_ENGINE,
-    ACTIVITY_CONTEXT,
-    TRACER,
-    rate_limiter=RATE_LIMITER,
-    budget_manager=BUDGET_MANAGER,
-    input_gate=INPUT_GATE,
-    injection_detector=INJECTION_DETECTOR,
-)
 
 
 class ApprovalRequest(BaseModel):
@@ -161,127 +34,214 @@ def _log(message: str, run_id: str, *args: object) -> None:
     logger.info(message, *args, extra={"run_id": run_id})
 
 
-@router.post("/runs")
-async def create_run(
-    request: Request,
-    payload: ChatRequest,
-    x_run_id: str | None = Header(default=None, alias="X_Run_Id"),
-) -> JSONResponse:
-    """Start a new run and return immediately."""
-    run_id = x_run_id or str(uuid.uuid4())
-    context_length = len(payload.context or "")
-    tenant_id = payload.identity.tenant_id if payload.identity else "default"
-    user_id = payload.identity.user_id if payload.identity else "anonymous"
-    identity = {"tenant_id": tenant_id, "user_id": user_id}
-    if not RATE_LIMITER.try_acquire(run_id, tenant_id):
-        await EVENT_BUS.publish(
-            rate_limit_exceeded_event(
-                run_id,
-                scope="run_start",
-                reason="concurrency_limit",
-                metadata={"tenant_id": tenant_id},
-                identity=identity,
+def get_router(container: "BackendContainer") -> APIRouter:
+    """Build API routes using the provided dependency container."""
+
+    from .observability.api import router as observability_router
+
+    router = APIRouter()
+    router.include_router(observability_router)
+
+    @router.post("/runs")
+    async def create_run(
+        request: Request,
+        payload: ChatRequest,
+        x_run_id: str | None = Header(default=None, alias="X_Run_Id"),
+    ) -> JSONResponse:
+        """Start a new run and return immediately."""
+        run_id = x_run_id or str(uuid.uuid4())
+        context_length = len(payload.context or "")
+        tenant_id = payload.identity.tenant_id if payload.identity else "default"
+        user_id = payload.identity.user_id if payload.identity else "anonymous"
+        identity = {"tenant_id": tenant_id, "user_id": user_id}
+        if not container.rate_limiter.try_acquire(run_id, tenant_id):
+            await container.event_bus.publish(
+                rate_limit_exceeded_event(
+                    run_id,
+                    scope="run_start",
+                    reason="concurrency_limit",
+                    metadata={"tenant_id": tenant_id},
+                    identity=identity,
+                )
             )
-        )
-        return JSONResponse(
-            {"ok": False, "reason": "rate_limited"},
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-        )
-    _log(
-        "run request mode=%s message_length=%s context_length=%s client=%s tenant=%s user=%s",
-        run_id,
-        payload.mode.value,
-        len(payload.message),
-        context_length,
-        request.client.host if request.client else "unknown",
-        tenant_id,
-        user_id,
-    )
-
-    state = RunState.new(
-        run_id=run_id,
-        message=payload.message,
-        context=payload.context,
-        mode=payload.mode,
-        tenant_id=tenant_id,
-        user_id=user_id,
-        cost_limit_usd=settings.limits.model_budget_usd or None,
-    )
-
-    try:
-        await RUN_COORDINATOR.start_run(state)
-    except Exception:
-        RATE_LIMITER.release(run_id)
-        BUDGET_MANAGER.reset(run_id)
-        raise
-    return JSONResponse({"ok": True, "run_id": run_id})
-
-
-@router.get("/runs/{run_id}/events")
-async def run_events(run_id: str) -> StreamingResponse:
-    """Replay stored events and stream new ones using SSE."""
-
-    async def event_generator():
-        async for chunk in sse_event_stream(run_id, EVENT_STORE, EVENT_BUS):
-            yield chunk
-
-    response = StreamingResponse(event_generator(), media_type="text/event-stream")
-    response.headers["Cache-Control"] = "no-cache"
-    response.headers["X-Accel-Buffering"] = "no"
-    response.headers["X-Run-Id"] = run_id
-    return response
-
-
-@router.get("/runs/{run_id}/state")
-async def run_state(run_id: str) -> JSONResponse:
-    """Return the latest stored RunState snapshot."""
-    state = STATE_STORE.load(run_id)
-    if not state:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="run not found")
-    return JSONResponse(state.model_dump())
-
-
-@router.get("/runs/{run_id}/workflow")
-async def run_workflow_state(run_id: str) -> JSONResponse:
-    """Return the persisted workflow state for the run."""
-    workflow_state = WORKFLOW_STORE.load(run_id)
-    if not workflow_state:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="workflow not found")
-    return JSONResponse(workflow_state.model_dump())
-
-
-@router.post("/runs/{run_id}/approval")
-async def run_approval_endpoint(run_id: str, payload: ApprovalRequest) -> JSONResponse:
-    """Record a human approval decision and resume the workflow."""
-    workflow_state = WORKFLOW_STORE.load(run_id)
-    if not workflow_state:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="workflow not found")
-    await WORKFLOW_ENGINE.record_human_decision(run_id, payload.decision)
-    return JSONResponse({"status": "recorded"})
-
-
-@router.post("/feedback")
-async def feedback_endpoint(payload: FeedbackRequest) -> JSONResponse:
-    """Persist structured feedback tied to a prior run."""
-    run_id = payload.run_id
-    _log(
-        "feedback received score=%s mode=%s",
-        run_id,
-        payload.score.value,
-        payload.mode.value,
-    )
-    record = payload.model_dump()
-    record["ts"] = iso_timestamp()
-
-    try:
-        with FEEDBACK_FILE.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record) + "\n")
-    except Exception:
-        logger.exception("failed to persist feedback", extra={"run_id": run_id})
-        return JSONResponse(
-            {"status": "error", "message": "Unable to record feedback."},
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            return JSONResponse(
+                {"ok": False, "reason": "rate_limited"},
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+        _log(
+            "run request mode=%s message_length=%s context_length=%s client=%s tenant=%s user=%s",
+            run_id,
+            payload.mode.value,
+            len(payload.message),
+            context_length,
+            request.client.host if request.client else "unknown",
+            tenant_id,
+            user_id,
         )
 
-    _log("feedback stored", run_id)
-    return JSONResponse({"status": "recorded"}, status_code=status.HTTP_201_CREATED)
+        state = RunState.new(
+            run_id=run_id,
+            message=payload.message,
+            context=payload.context,
+            mode=payload.mode,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            cost_limit_usd=container.settings.limits.model_budget_usd or None,
+        )
+
+        try:
+            await container.run_coordinator.start_run(state)
+        except Exception:
+            container.rate_limiter.release(run_id)
+            container.budget_manager.reset(run_id)
+            raise
+        return JSONResponse({"ok": True, "run_id": run_id})
+
+    @router.get("/runs/{run_id}/events")
+    async def run_events(run_id: str) -> StreamingResponse:
+        """Replay stored events and stream new ones using SSE."""
+
+        async def event_generator():
+            async for chunk in sse_event_stream(run_id, container.event_store, container.event_bus):
+                yield chunk
+
+        response = StreamingResponse(event_generator(), media_type="text/event-stream")
+        response.headers["Cache-Control"] = "no-cache"
+        response.headers["X-Accel-Buffering"] = "no"
+        response.headers["X-Run-Id"] = run_id
+        return response
+
+    @router.get("/runs/{run_id}/state")
+    async def run_state(run_id: str) -> JSONResponse:
+        """Return the latest stored RunState snapshot."""
+        state = container.state_store.load(run_id)
+        if not state:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="run not found")
+        return JSONResponse(state.model_dump())
+
+    @router.get("/runs/{run_id}/workflow")
+    async def run_workflow_state(run_id: str) -> JSONResponse:
+        """Return the persisted workflow state for the run."""
+        workflow_state = container.workflow_store.load(run_id)
+        if not workflow_state:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="workflow not found")
+        return JSONResponse(workflow_state.model_dump())
+
+    @router.post("/runs/{run_id}/approval")
+    async def run_approval_endpoint(run_id: str, payload: ApprovalRequest) -> JSONResponse:
+        """Record a human approval decision and resume the workflow."""
+        workflow_state = container.workflow_store.load(run_id)
+        if not workflow_state:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="workflow not found")
+        await container.workflow_engine.record_human_decision(run_id, payload.decision)
+        return JSONResponse({"status": "recorded"})
+
+    @router.post("/feedback")
+    async def feedback_endpoint(payload: FeedbackRequest) -> JSONResponse:
+        """Persist structured feedback tied to a prior run."""
+        run_id = payload.run_id
+        _log(
+            "feedback received score=%s mode=%s",
+            run_id,
+            payload.score.value,
+            payload.mode.value,
+        )
+        record = payload.model_dump()
+        record["ts"] = iso_timestamp()
+
+        try:
+            with container.feedback_file.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record) + "\n")
+        except Exception:
+            logger.exception("failed to persist feedback", extra={"run_id": run_id})
+            return JSONResponse(
+                {"status": "error", "message": "Unable to record feedback."},
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        _log("feedback stored", run_id)
+        return JSONResponse({"status": "recorded"}, status_code=status.HTTP_201_CREATED)
+
+    return router
+
+
+def router_from_request(request: Request) -> APIRouter:
+    """Back-compat for callers that need a router but have a FastAPI request.
+
+    Prefer wiring routes during app construction with `get_router(container)`.
+    """
+
+    container = _require_container(request)
+    return get_router(container)
+
+
+_LEGACY_CONTAINER: "BackendContainer | None" = None
+
+
+def _get_legacy_container() -> "BackendContainer":
+    """Lazy container for legacy imports.
+
+    Preserves older patterns like `from app.api import STATE_STORE` without
+    triggering initialization at module import time.
+    """
+
+    global _LEGACY_CONTAINER
+    if _LEGACY_CONTAINER is not None:
+        return _LEGACY_CONTAINER
+
+    settings = get_settings()
+
+    from .container import build_container, startup, wire_legacy_globals
+
+    container = build_container(settings=settings)
+    wire_legacy_globals(container)
+    startup(container)
+    _LEGACY_CONTAINER = container
+    return container
+
+
+def _require_container(request: Request) -> "BackendContainer":
+    container = getattr(request.app.state, "container", None)
+    if container is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="backend container not initialized",
+        )
+    return container
+
+
+def __getattr__(name: str) -> Any:  # pragma: no cover - compatibility shim
+    import warnings
+
+    legacy_map = {
+        "EVENT_STORE": "event_store",
+        "EVENT_BUS": "event_bus",
+        "STATE_STORE": "state_store",
+        "WORKFLOW_STORE": "workflow_store",
+        "WORKFLOW_ENGINE": "workflow_engine",
+        "RUN_COORDINATOR": "run_coordinator",
+        "TRACE_STORE": "trace_store",
+        "TRACER": "tracer",
+        "RETRIEVAL_STORE": "retrieval_store",
+        "EMBEDDING_GENERATOR": "embedding_generator",
+        "MCP_REGISTRY": "mcp_registry",
+        "MCP_CLIENT": "mcp_client",
+        "PERMISSION_GATE": "permission_gate",
+        "CACHE_STORE": "cache_store",
+        "RATE_LIMITER": "rate_limiter",
+        "BUDGET_MANAGER": "budget_manager",
+        "GUARDRAIL_MONITOR": "guardrail_monitor",
+        "router": None,
+    }
+    if name not in legacy_map:
+        raise AttributeError(name)
+    warnings.warn(
+        f"`app.api.{name}` is deprecated; use dependency injection via `BackendContainer` (see `app.container`).",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    container = _get_legacy_container()
+    attr = legacy_map[name]
+    if attr is None:
+        return get_router(container)
+    return getattr(container, attr)

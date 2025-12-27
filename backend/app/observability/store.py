@@ -19,11 +19,15 @@ class TraceNotInitializedError(TraceStoreError):
 class TraceStore:
     """Appends and updates trace payloads atomically."""
 
-    def __init__(self, base_dir: str | Path):
+    def __init__(self, base_dir: str | Path, *, ensure_dirs: bool = True):
         self.base_dir = Path(base_dir)
-        self.base_dir.mkdir(parents=True, exist_ok=True)
+        if ensure_dirs:
+            self.base_dir.mkdir(parents=True, exist_ok=True)
         self._locks: dict[str, threading.Lock] = {}
         self._locks_lock = threading.Lock()
+
+    def ensure_base_dir(self) -> None:
+        self.base_dir.mkdir(parents=True, exist_ok=True)
 
     def _trace_file(self, run_id: str) -> Path:
         return self.base_dir / f"{run_id}.json"
@@ -66,6 +70,7 @@ class TraceStore:
 
     def init_trace(self, run_id: str, trace_payload: dict[str, Any]) -> dict[str, Any]:
         """Create (or refresh) the trace envelope for a run."""
+        self.ensure_base_dir()
         path = self._trace_file(run_id)
         lock = self._get_lock(run_id)
         with lock:
@@ -81,6 +86,7 @@ class TraceStore:
 
     def update_trace(self, run_id: str, updates: dict[str, Any]) -> dict[str, Any]:
         """Update selected fields on the stored trace."""
+        self.ensure_base_dir()
         lock = self._get_lock(run_id)
         with lock:
             payload = self._load_payload(run_id)
@@ -92,6 +98,7 @@ class TraceStore:
 
     def append_span(self, run_id: str, span_payload: dict[str, Any]) -> dict[str, Any]:
         """Append a span record to the trace file."""
+        self.ensure_base_dir()
         lock = self._get_lock(run_id)
         with lock:
             payload = self._load_payload(run_id)
@@ -108,6 +115,7 @@ class TraceStore:
         updates: dict[str, Any],
     ) -> dict[str, Any]:
         """Update an existing span in place."""
+        self.ensure_base_dir()
         lock = self._get_lock(run_id)
         with lock:
             payload = self._load_payload(run_id)
@@ -132,6 +140,7 @@ class TraceStore:
         output_tokens_delta: int = 0,
     ) -> dict[str, Any]:
         """Atomically increment aggregate totals on the trace."""
+        self.ensure_base_dir()
         lock = self._get_lock(run_id)
         with lock:
             payload = self._load_payload(run_id)
@@ -157,6 +166,7 @@ class TraceStore:
 
     def load_trace(self, run_id: str) -> dict[str, Any]:
         """Return both the trace envelope and spans."""
+        self.ensure_base_dir()
         lock = self._get_lock(run_id)
         with lock:
             payload = self._load_payload(run_id)
@@ -167,6 +177,7 @@ class TraceStore:
 
     def load_spans(self, run_id: str) -> list[dict[str, Any]]:
         """Return all spans for the run."""
+        self.ensure_base_dir()
         lock = self._get_lock(run_id)
         with lock:
             payload = self._load_payload(run_id)

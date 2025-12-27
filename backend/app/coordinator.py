@@ -35,6 +35,7 @@ class RunCoordinator:
         injection_detector: InjectionDetector | None = None,
         rate_limiter: RateLimiter | None = None,
         budget_manager: BudgetManager | None = None,
+        subscribe: bool = True,
     ):
         self.bus = bus
         self.state_store = state_store
@@ -45,6 +46,14 @@ class RunCoordinator:
         self.injection_detector = injection_detector
         self.rate_limiter = rate_limiter
         self.budget_manager = budget_manager
+        self._unsubscribe = None
+        if subscribe:
+            self._unsubscribe = self.bus.subscribe_all(self._handle_event)
+
+    def start(self) -> None:
+        """Start consuming events from the bus (idempotent)."""
+        if self._unsubscribe:
+            return
         self._unsubscribe = self.bus.subscribe_all(self._handle_event)
 
     async def start_run(self, state: RunState) -> None:

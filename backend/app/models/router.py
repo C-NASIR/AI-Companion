@@ -63,4 +63,19 @@ class ModelRouter:
         self._config = self._load_config()
 
 
-MODEL_ROUTER = ModelRouter()
+_MODEL_ROUTER: ModelRouter | None = None
+
+
+def get_model_router() -> ModelRouter:
+    """Return a cached router instance built from current environment."""
+
+    global _MODEL_ROUTER
+    if _MODEL_ROUTER is None:
+        _MODEL_ROUTER = ModelRouter()
+    return _MODEL_ROUTER
+
+
+def __getattr__(name: str) -> ModelRouter:  # pragma: no cover
+    if name == "MODEL_ROUTER":
+        return get_model_router()
+    raise AttributeError(name)

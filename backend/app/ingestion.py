@@ -15,7 +15,7 @@ from openai import OpenAI
 
 from .events import EventBus, new_event
 from .knowledge import set_corpus_version
-from .model import OPENAI_API_KEY, OPENAI_BASE_URL
+from .model import get_openai_api_key, get_openai_base_url
 from .retrieval import ChunkEmbedding, RetrievalStore
 
 logger = logging.getLogger(__name__)
@@ -58,14 +58,16 @@ class EmbeddingGenerator:
 
     def __init__(self) -> None:
         self._client: OpenAI | None = None
-        self._use_openai = bool(OPENAI_API_KEY)
+        self._use_openai = bool(get_openai_api_key())
 
     def _client_kwargs(self) -> dict[str, str]:
         kwargs: dict[str, str] = {}
-        if OPENAI_API_KEY:
-            kwargs["api_key"] = OPENAI_API_KEY
-        if OPENAI_BASE_URL:
-            kwargs["base_url"] = OPENAI_BASE_URL
+        api_key = get_openai_api_key()
+        base_url = get_openai_base_url()
+        if api_key:
+            kwargs["api_key"] = api_key
+        if base_url:
+            kwargs["base_url"] = base_url
         return kwargs
 
     def _get_client(self) -> OpenAI:

@@ -28,46 +28,101 @@ def _env_int(name: str, default: int) -> int:
 class GuardrailSettings:
     """Per-layer guardrail feature flags."""
 
-    input_gate_enabled: bool = _env_bool("GUARDRAIL_INPUT_ENABLED", True)
-    context_sanitizer_enabled: bool = _env_bool(
-        "GUARDRAIL_CONTEXT_SANITIZER_ENABLED", True
-    )
-    output_validator_enabled: bool = _env_bool(
-        "GUARDRAIL_OUTPUT_VALIDATION_ENABLED", True
-    )
-    injection_detector_enabled: bool = _env_bool(
-        "GUARDRAIL_INJECTION_DETECTOR_ENABLED", True
-    )
-    tool_firewall_enabled: bool = _env_bool("GUARDRAIL_TOOL_FIREWALL_ENABLED", True)
-    monitor_report_seconds: int = max(
-        30, _env_int("GUARDRAIL_MONITOR_REPORT_SECONDS", 120)
-    )
+    input_gate_enabled: bool
+    context_sanitizer_enabled: bool
+    output_validator_enabled: bool
+    injection_detector_enabled: bool
+    tool_firewall_enabled: bool
+    monitor_report_seconds: int
+
+    @classmethod
+    def from_env(cls) -> "GuardrailSettings":
+        return cls(
+            input_gate_enabled=_env_bool("GUARDRAIL_INPUT_ENABLED", True),
+            context_sanitizer_enabled=_env_bool(
+                "GUARDRAIL_CONTEXT_SANITIZER_ENABLED", True
+            ),
+            output_validator_enabled=_env_bool(
+                "GUARDRAIL_OUTPUT_VALIDATION_ENABLED", True
+            ),
+            injection_detector_enabled=_env_bool(
+                "GUARDRAIL_INJECTION_DETECTOR_ENABLED", True
+            ),
+            tool_firewall_enabled=_env_bool("GUARDRAIL_TOOL_FIREWALL_ENABLED", True),
+            monitor_report_seconds=max(
+                30, _env_int("GUARDRAIL_MONITOR_REPORT_SECONDS", 120)
+            ),
+        )
 
 
 @dataclass(frozen=True)
 class CachingSettings:
     """Feature flags for cache layers."""
 
-    retrieval_cache_enabled: bool = _env_bool("CACHE_RETRIEVAL_ENABLED", True)
-    tool_cache_enabled: bool = _env_bool("CACHE_TOOL_RESULTS_ENABLED", True)
+    retrieval_cache_enabled: bool
+    tool_cache_enabled: bool
+
+    @classmethod
+    def from_env(cls) -> "CachingSettings":
+        return cls(
+            retrieval_cache_enabled=_env_bool("CACHE_RETRIEVAL_ENABLED", True),
+            tool_cache_enabled=_env_bool("CACHE_TOOL_RESULTS_ENABLED", True),
+        )
 
 
 @dataclass(frozen=True)
 class LimitSettings:
     """Rate limiting and budget controls."""
 
-    global_concurrency: int = _env_int("RATE_LIMIT_GLOBAL_CONCURRENCY", 8)
-    tenant_concurrency: int = _env_int("RATE_LIMIT_TENANT_CONCURRENCY", 4)
-    model_budget_usd: float = float(os.getenv("RUN_MODEL_BUDGET_USD", "0") or 0)
+    global_concurrency: int
+    tenant_concurrency: int
+    model_budget_usd: float
+
+    @classmethod
+    def from_env(cls) -> "LimitSettings":
+        return cls(
+            global_concurrency=_env_int("RATE_LIMIT_GLOBAL_CONCURRENCY", 8),
+            tenant_concurrency=_env_int("RATE_LIMIT_TENANT_CONCURRENCY", 4),
+            model_budget_usd=float(os.getenv("RUN_MODEL_BUDGET_USD", "0") or 0),
+        )
 
 
 class Settings:
     """Container for application settings."""
 
-    def __init__(self) -> None:
-        self.guardrails = GuardrailSettings()
-        self.caching = CachingSettings()
-        self.limits = LimitSettings()
+    def __init__(
+        self,
+        *,
+        guardrails: GuardrailSettings,
+        caching: CachingSettings,
+        limits: LimitSettings,
+    ) -> None:
+        self.guardrails = guardrails
+        self.caching = caching
+        self.limits = limits
+
+    @classmethod
+    def from_env(cls) -> "Settings":
+        return cls(
+            guardrails=GuardrailSettings.from_env(),
+            caching=CachingSettings.from_env(),
+            limits=LimitSettings.from_env(),
+        )
 
 
-settings = Settings()
+_SETTINGS: Settings | None = None
+
+
+def get_settings() -> Settings:
+    """Return a cached Settings instance built from the current environment."""
+
+    global _SETTINGS
+    if _SETTINGS is None:
+        _SETTINGS = Settings.from_env()
+    return _SETTINGS
+
+
+def __getattr__(name: str) -> Settings:  # pragma: no cover
+    if name == "settings":
+        return get_settings()
+    raise AttributeError(name)

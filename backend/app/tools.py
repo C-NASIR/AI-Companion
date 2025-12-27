@@ -112,21 +112,29 @@ def execute_calculator(payload: CalculatorInput) -> CalculatorOutput:
     return CalculatorOutput(result=result)
 
 
-REGISTRY = ToolRegistry()
-REGISTRY.register(
-    ToolSpec(
-        name="calculator",
-        description="Performs simple arithmetic operations safely.",
-        input_model=CalculatorInput,
-        output_model=CalculatorOutput,
-        error_model=CalculatorError,
-        execute=execute_calculator,
+def build_default_registry() -> ToolRegistry:
+    registry = ToolRegistry()
+    registry.register(
+        ToolSpec(
+            name="calculator",
+            description="Performs simple arithmetic operations safely.",
+            input_model=CalculatorInput,
+            output_model=CalculatorOutput,
+            error_model=CalculatorError,
+            execute=execute_calculator,
+        )
     )
-)
+    return registry
+
+
+_REGISTRY: ToolRegistry | None = None
 
 
 def get_tool_registry() -> ToolRegistry:
-    return REGISTRY
+    global _REGISTRY
+    if _REGISTRY is None:
+        _REGISTRY = build_default_registry()
+    return _REGISTRY
 
 
 def validate_tool_arguments(spec: ToolSpec, arguments: Mapping[str, object]) -> ToolInputModel:
