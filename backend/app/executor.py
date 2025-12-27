@@ -27,6 +27,7 @@ from .mcp.server import MCPServerError
 from .observability.tracer import Tracer
 from .permissions import PermissionGate
 from .state_store import StateStore
+from .lease import RunLease
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,8 @@ class ToolExecutor:
         state_store: StateStore,
         tracer: Tracer | None = None,
         *,
+        run_lease: RunLease | None = None,
+        lease_key: str = "system:tool_executor",
         tool_firewall_enabled: bool = True,
         cache_store: CacheStore | None = None,
         tool_cache_enabled: bool = True,
@@ -53,6 +56,9 @@ class ToolExecutor:
         self.permission_gate = permission_gate
         self.state_store = state_store
         self.tracer = tracer
+        self.run_lease = run_lease
+        self.lease_key = lease_key
+        self._lease_acquired = False
         self._queue: asyncio.Queue[Event] | None = None
         self._task: asyncio.Task[None] | None = None
         self._unsubscribe: Callable[[], None] | None = None
@@ -65,6 +71,15 @@ class ToolExecutor:
     async def start(self) -> None:
         if self._task:
             return
+
+        if self.run_lease is not None:
+            self._lease_acquired = await self.run_lease.acquire(self.lease_key)
+            if not self._lease_acquired:
+                logger.info(
+                    "tool executor lease unavailable; not starting",
+                    extra={"run_id": "system"},
+                )
+                return
         self._queue = asyncio.Queue()
         self._unsubscribe = self.bus.subscribe_all(self._enqueue_event)
         self._task = asyncio.create_task(self._run_loop(), name="tool-executor")
@@ -83,6 +98,9 @@ class ToolExecutor:
             self._task = None
         self._queue = None
         logger.info("tool executor stopped", extra={"run_id": "system"})
+        if self._lease_acquired and self.run_lease is not None:
+            await self.run_lease.release(self.lease_key)
+        self._lease_acquired = False
 
     async def _enqueue_event(self, event: Event) -> None:
         if event.type == "tool.requested" and self._queue is not None:
@@ -234,7 +252,8 @@ class ToolExecutor:
                     },
                 )
                 return
-            self._tool_counts[run_id] += 1
+
+        self._tool_counts[run_id] += 1
 
         side_effect = self._classify_side_effect(descriptor.permission_scope)
         permission_context = self._permission_context_for_run(run_id)
@@ -417,6 +436,16 @@ class ToolExecutor:
         if cacheable and cache_key:
             self.cache_store.store_tool(tenant_id, tool_name, arguments, result.output or {})
         self._end_tool_span(run_id, span_id, "success")
+
+    async def process_tool_requested(self, event: Event) -> None:
+        """Process a persisted `tool.requested` event.
+
+        Used by distributed tool workers that consume from a durable queue.
+        """
+
+        if event.type != "tool.requested":
+            return
+        await self._process_tool_request(event)
 
     async def _emit_success(
         self,

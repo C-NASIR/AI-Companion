@@ -16,9 +16,7 @@ from .container import (
 )
 from .executor import ToolExecutor
 from .ingestion import run_ingestion
-from .events import tool_discovered_event
-from .mcp.servers.calculator_server import CalculatorMCPServer
-from .mcp.servers.github_server import GitHubMCPServer
+from .mcp.bootstrap import initialize_mcp
 from .startup_checks import run_startup_checks
 from .env import load_dotenv_if_present
 
@@ -43,25 +41,6 @@ def _configure_logging() -> None:
         handler.addFilter(run_filter)
 
 
-async def _initialize_mcp(container) -> None:
-    if getattr(container, "_mcp_initialized", False):
-        return
-    servers = [CalculatorMCPServer(), GitHubMCPServer()]
-    for server in servers:
-        container.mcp_client.register_server(server)
-    descriptors = await container.mcp_client.discover_tools()
-    for descriptor in descriptors:
-        await container.event_bus.publish(
-            tool_discovered_event(
-                "system",
-                tool_name=descriptor.name,
-                source=descriptor.source,
-                permission_scope=descriptor.permission_scope,
-            )
-        )
-    container._mcp_initialized = True
-
-
 def create_app() -> FastAPI:
     """Construct the FastAPI application."""
     _configure_logging()
@@ -81,6 +60,7 @@ def create_app() -> FastAPI:
         container.permission_gate,
         container.state_store,
         container.tracer,
+        run_lease=container.run_lease,
         tool_firewall_enabled=settings.guardrails.tool_firewall_enabled,
         cache_store=container.cache_store,
         tool_cache_enabled=settings.caching.tool_cache_enabled,
@@ -100,9 +80,14 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     async def _startup() -> None:
         run_startup_checks()
-        startup_container(container)
-        await _initialize_mcp(container)
-        await tool_executor.start()
+        startup_container(
+            container,
+            start_coordinator=settings.runtime.mode == "single_process",
+            start_guardrail_monitor=settings.runtime.mode == "single_process",
+        )
+        await initialize_mcp(container)
+        if settings.runtime.mode == "single_process":
+            await tool_executor.start()
         stats = await run_ingestion(
             container.retrieval_store,
             embedder=container.embedding_generator,

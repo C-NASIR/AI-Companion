@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Literal
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -22,6 +23,36 @@ def _env_int(name: str, default: int) -> int:
         return int(value)
     except ValueError:
         return default
+
+
+def _env_str(name: str, default: str | None = None) -> str | None:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip()
+    return normalized or default
+
+
+RuntimeMode = Literal["single_process", "distributed"]
+
+
+@dataclass(frozen=True)
+class RuntimeSettings:
+    """Runtime configuration for single vs distributed deployments."""
+
+    mode: RuntimeMode
+    redis_url: str | None
+    run_lease_ttl_seconds: int
+
+    @classmethod
+    def from_env(cls) -> "RuntimeSettings":
+        raw_mode = (_env_str("BACKEND_MODE", "single_process") or "single_process").lower()
+        mode: RuntimeMode = "distributed" if raw_mode == "distributed" else "single_process"
+        return cls(
+            mode=mode,
+            redis_url=_env_str("REDIS_URL"),
+            run_lease_ttl_seconds=max(5, _env_int("RUN_LEASE_TTL_SECONDS", 30)),
+        )
 
 
 @dataclass(frozen=True)
@@ -93,10 +124,12 @@ class Settings:
     def __init__(
         self,
         *,
+        runtime: RuntimeSettings,
         guardrails: GuardrailSettings,
         caching: CachingSettings,
         limits: LimitSettings,
     ) -> None:
+        self.runtime = runtime
         self.guardrails = guardrails
         self.caching = caching
         self.limits = limits
@@ -104,6 +137,7 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         return cls(
+            runtime=RuntimeSettings.from_env(),
             guardrails=GuardrailSettings.from_env(),
             caching=CachingSettings.from_env(),
             limits=LimitSettings.from_env(),

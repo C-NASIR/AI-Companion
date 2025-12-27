@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from .events import rate_limit_exceeded_event, sse_event_stream
+from .events import new_event
 from .schemas import ChatRequest, FeedbackRequest, iso_timestamp
 from .settings import get_settings
 from .state import RunState
@@ -133,7 +134,16 @@ def get_router(container: "BackendContainer") -> APIRouter:
         workflow_state = container.workflow_store.load(run_id)
         if not workflow_state:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="workflow not found")
-        await container.workflow_engine.record_human_decision(run_id, payload.decision)
+        if container.settings.runtime.mode == "distributed":
+            await container.event_bus.publish(
+                new_event(
+                    "workflow.approval.recorded",
+                    run_id,
+                    {"decision": payload.decision},
+                )
+            )
+        else:
+            await container.workflow_engine.record_human_decision(run_id, payload.decision)
         return JSONResponse({"status": "recorded"})
 
     @router.post("/feedback")

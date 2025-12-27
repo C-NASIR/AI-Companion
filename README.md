@@ -11,7 +11,8 @@ Session 6 keeps the event-driven backbone and knowledge foundation from earlier 
 - `backend/data/traces` – Session 8 trace files (`{run_id}.json`) with the trace envelope plus every span.
 - `backend/app/eval` – Session 9 evaluation scaffolding (dataset, runner, scorers, report, gate, CLI) that replays full intelligence runs deterministically.
 - `backend/data/eval` – Reserved for evaluation artifacts (latest `report.json`, per-case trajectory exports) consumed by CI and local developers.
-- `infra/compose.yaml` – Docker Compose stack. The backend bind-mounts `backend/data` into `/app/data`, and its entrypoint wipes that directory on container start and shutdown so you see live files locally without persisting them between runs.
+- `infra/compose.yaml` – Single-process Docker Compose stack.
+- `infra/compose.distributed.yaml` – Distributed-mode stack (Redis + web + workers).
 - `docs/` – Project overview, per-session prompts, and the Session 5 implementation plan.
 - `backend/data/docs` – Authoritative markdown corpus that ingestion reads on startup. Stable filenames become `document_id` values inside chunk metadata.
 
@@ -51,6 +52,16 @@ The script fails fast if required env vars are missing, directories are not writ
 ```bash
 docker compose -f infra/compose.yaml up --build
 ```
+
+## Run distributed mode (Docker Compose)
+
+Distributed mode runs the backend as a stateless-ish web API and moves workflow/tool execution into dedicated workers.
+
+```bash
+docker compose -f infra/compose.distributed.yaml up --build
+```
+
+See `docs/distributed_runbook.md` for roles and operational notes.
 
 Ports:
 

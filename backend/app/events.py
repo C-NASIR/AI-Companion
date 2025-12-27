@@ -11,6 +11,9 @@ from typing import Any, Literal, Mapping, Sequence
 from uuid import uuid4
 import threading
 
+from .event_transport import InMemoryEventTransport
+from .tool_queue import NoopToolQueuePublisher
+
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .schemas import iso_timestamp
@@ -547,52 +550,45 @@ EventCallback = Callable[[Event], Awaitable[None]]
 
 
 class EventBus:
-    """In-memory pub/sub bus that persists through the event store first."""
+    """Persist-first event bus with pluggable live transport."""
 
-    def __init__(self, store: EventStore):
+    def __init__(
+        self,
+        store: EventStore,
+        transport: object | None = None,
+        tool_queue: object | None = None,
+    ):
         self._store = store
-        self._subscribers: dict[str, set[EventCallback]] = {}
-        self._global_subscribers: set[EventCallback] = set()
+        self._transport = transport or InMemoryEventTransport()
+        self._tool_queue = tool_queue or NoopToolQueuePublisher()
 
     async def publish(self, event: Event | Mapping[str, Any]) -> Event:
         """Persist event then fan out to live subscribers."""
         stored = self._store.append(event)
-        callbacks = list(self._subscribers.get(stored.run_id, ()))
-        global_callbacks = list(self._global_subscribers)
-        for callback in callbacks + global_callbacks:
-            try:
-                await callback(stored)
-            except Exception:  # pragma: no cover - defensive logging
-                logger.exception(
-                    "event subscriber failed run_id=%s type=%s",
-                    stored.run_id,
-                    stored.type,
-                )
+        if stored.type == "tool.requested":
+            payload_json = json.dumps(stored.model_dump(), separators=(",", ":"))
+            enqueue = getattr(self._tool_queue, "enqueue_tool_requested", None)
+            if enqueue is not None:
+                await enqueue(payload_json, run_id=stored.run_id, event_id=stored.id)
+        await self._transport.publish(stored)
         return stored
 
     def subscribe(self, run_id: str, callback: EventCallback) -> Callable[[], None]:
         """Register callback for run-specific events and return unsubscribe handle."""
-        subscribers = self._subscribers.setdefault(run_id, set())
-        subscribers.add(callback)
-
-        def _unsubscribe() -> None:
-            current = self._subscribers.get(run_id)
-            if not current:
-                return
-            current.discard(callback)
-            if not current:
-                self._subscribers.pop(run_id, None)
-
-        return _unsubscribe
+        return self._transport.subscribe(run_id, callback)
 
     def subscribe_all(self, callback: EventCallback) -> Callable[[], None]:
         """Register callback for all run events."""
-        self._global_subscribers.add(callback)
+        return self._transport.subscribe_all(callback)
 
-        def _unsubscribe() -> None:
-            self._global_subscribers.discard(callback)
+    async def close(self) -> None:
+        close = getattr(self._transport, "close", None)
+        if close is not None:
+            await close()
 
-        return _unsubscribe
+        tool_close = getattr(self._tool_queue, "close", None)
+        if tool_close is not None:
+            await tool_close()
 
 
 def _format_sse(event: Event) -> str:
@@ -607,16 +603,22 @@ async def sse_event_stream(
     """Async generator yielding SSE-formatted replay plus live events."""
     queue: asyncio.Queue[Event] = asyncio.Queue()
 
+    last_seq = 0
+
     async def _subscriber(event: Event) -> None:
         await queue.put(event)
 
     unsubscribe = bus.subscribe(run_id, _subscriber)
     try:
-        for event in store.replay(run_id):
+        replayed = store.replay(run_id)
+        for event in replayed:
+            last_seq = max(last_seq, int(event.seq or 0))
             yield _format_sse(event)
 
         while True:
             event = await queue.get()
+            if int(event.seq or 0) <= last_seq:
+                continue
             yield _format_sse(event)
     except asyncio.CancelledError:
         raise

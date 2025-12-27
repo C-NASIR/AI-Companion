@@ -24,6 +24,7 @@ from .models import (
 from .retries import policy_for_step
 from .store import WorkflowStore
 from .exceptions import ExternalEventRequired, HumanApprovalRequired, WorkflowEngineError
+from ..lease import NoopRunLease, RunLease
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,7 @@ class WorkflowEngine:
         activities: dict[str, ActivityFunc] | None = None,
         activity_context: ActivityContext | None = None,
         tracer: Tracer | None = None,
+        run_lease: RunLease | None = None,
     ):
         self.bus = bus
         self.workflow_store = workflow_store
@@ -66,8 +68,13 @@ class WorkflowEngine:
         self.activities = activities or {}
         self.activity_context = activity_context
         self.tracer = tracer
+        self.run_lease = run_lease or NoopRunLease()
         self._runtimes: dict[str, WorkflowRuntime] = {}
         self._lock = asyncio.Lock()
+
+    @staticmethod
+    def _lease_key(run_id: str) -> str:
+        return f"workflow:{run_id}"
 
     def register_activity(self, step: str, func: ActivityFunc) -> None:
         """Register (or replace) the activity func for a workflow step."""
@@ -78,6 +85,13 @@ class WorkflowEngine:
 
     async def start_run(self, state: RunState) -> None:
         """Start a new workflow for the provided RunState."""
+        lease_key = self._lease_key(state.run_id)
+        if not await self.run_lease.acquire(lease_key):
+            logger.info(
+                "workflow lease unavailable; skipping start",
+                extra={"run_id": state.run_id},
+            )
+            return
         async with self._lock:
             if state.run_id in self._runtimes:
                 logger.warning(
@@ -108,6 +122,13 @@ class WorkflowEngine:
 
     async def resume_run(self, run_id: str) -> None:
         """Rehydrate a workflow runner from persisted state."""
+        lease_key = self._lease_key(run_id)
+        if not await self.run_lease.acquire(lease_key):
+            logger.info(
+                "workflow lease unavailable; skipping resume",
+                extra={"run_id": run_id},
+            )
+            return
         async with self._lock:
             runtime = self._runtimes.get(run_id)
             if runtime:
@@ -138,6 +159,12 @@ class WorkflowEngine:
         runtime = await self._ensure_runtime(event.run_id)
         if not runtime:
             return
+        if event.type == "workflow.approval.recorded":
+            decision = event.data.get("decision")
+            if isinstance(decision, str) and decision:
+                await self._apply_human_decision(runtime, decision, emit_event=False)
+            await runtime.queue.put(WorkflowSignal(reason="resume"))
+            return
         logger.info(
             "workflow external event received type=%s",
             event.type,
@@ -150,10 +177,7 @@ class WorkflowEngine:
         runtime = await self._ensure_runtime(run_id)
         if not runtime:
             return
-        runtime.workflow_state.set_human_decision(decision)
-        runtime.workflow_state.status = WorkflowStatus.RUNNING
-        self.workflow_store.save(runtime.workflow_state)
-        self._end_wait_span(runtime, "success")
+        await self._apply_human_decision(runtime, decision, emit_event=True)
         logger.info(
             "workflow approval recorded decision=%s",
             decision,
@@ -165,6 +189,24 @@ class WorkflowEngine:
             {"decision": decision},
         )
         await runtime.queue.put(WorkflowSignal(reason="resume"))
+
+    async def _apply_human_decision(
+        self,
+        runtime: WorkflowRuntime,
+        decision: str,
+        *,
+        emit_event: bool,
+    ) -> None:
+        runtime.workflow_state.set_human_decision(decision)
+        runtime.workflow_state.status = WorkflowStatus.RUNNING
+        self.workflow_store.save(runtime.workflow_state)
+        self._end_wait_span(runtime, "success")
+        if emit_event:
+            await self._emit_workflow_event(
+                runtime.run_state.run_id,
+                "workflow.approval.recorded",
+                {"decision": decision},
+            )
 
     def _build_runtime(
         self, run_state: RunState, workflow_state: WorkflowState
@@ -192,6 +234,12 @@ class WorkflowEngine:
             runtime = self._runtimes.get(run_id)
             if runtime:
                 return runtime
+            if not await self.run_lease.acquire(self._lease_key(run_id)):
+                logger.info(
+                    "workflow lease unavailable; ignoring runtime creation",
+                    extra={"run_id": run_id},
+                )
+                return None
             run_state = self.state_store.load(run_id)
             workflow_state = self.workflow_store.load(run_id)
             if not run_state or not workflow_state:
@@ -208,11 +256,23 @@ class WorkflowEngine:
         if not runtime:
             return
         try:
+            if not await self.run_lease.refresh(self._lease_key(run_id)):
+                logger.info(
+                    "workflow lease lost; stopping driver",
+                    extra={"run_id": run_id},
+                )
+                return
             await self._process_until_blocked(runtime)
             while runtime.workflow_state.status not in {
                 WorkflowStatus.COMPLETED,
                 WorkflowStatus.FAILED,
             }:
+                if not await self.run_lease.refresh(self._lease_key(run_id)):
+                    logger.info(
+                        "workflow lease lost; stopping driver",
+                        extra={"run_id": run_id},
+                    )
+                    return
                 signal = await runtime.queue.get()
                 if signal.event:
                     awaited = runtime.workflow_state.pending_events
@@ -235,6 +295,7 @@ class WorkflowEngine:
         finally:
             async with self._lock:
                 self._runtimes.pop(run_id, None)
+            await self.run_lease.release(self._lease_key(run_id))
 
     async def _process_until_blocked(self, runtime: WorkflowRuntime) -> None:
         """Run workflow steps until a pause or terminal condition."""

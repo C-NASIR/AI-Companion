@@ -11,12 +11,7 @@ logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
-WRITABLE_DIRS = [
-    DATA_DIR,
-    DATA_DIR / "events",
-    DATA_DIR / "state",
-    DATA_DIR / "traces",
-]
+WRITABLE_DIRS = [DATA_DIR, DATA_DIR / "events", DATA_DIR / "state", DATA_DIR / "traces"]
 REQUIRED_ENV_VARS = (
     "MODEL_ROUTING_DEFAULT_MODEL",
     "MODEL_PRICE_DEFAULT_INPUT_USD",
@@ -66,6 +61,10 @@ def run_startup_checks() -> None:
         logger.warning("Startup checks skipped via SKIP_STARTUP_CHECKS=1")
         return
 
+    backend_mode = (os.getenv("BACKEND_MODE") or "single_process").strip().lower()
+    if backend_mode not in {"single_process", "distributed"}:
+        raise RuntimeError(f"BACKEND_MODE must be single_process|distributed, got {backend_mode!r}")
+
     for var in ("MODEL_ROUTING_DEFAULT_MODEL",):
         _require_env(var)
     for var in (
@@ -82,10 +81,25 @@ def run_startup_checks() -> None:
     for var in ("RATE_LIMIT_GLOBAL_CONCURRENCY", "RATE_LIMIT_TENANT_CONCURRENCY"):
         _ensure_positive_int(var)
 
-    for directory in WRITABLE_DIRS:
-        _ensure_dir_writable(directory)
+    if backend_mode == "single_process":
+        for directory in WRITABLE_DIRS:
+            _ensure_dir_writable(directory)
+    else:
+        redis_url = os.getenv("REDIS_URL")
+        if redis_url is None or not redis_url.strip():
+            raise RuntimeError("REDIS_URL is required when BACKEND_MODE=distributed")
+        try:
+            from redis import Redis
 
-    logger.info("Startup checks passed. Environment and data directories are valid.")
+            client = Redis.from_url(redis_url.strip(), decode_responses=True)
+            client.ping()
+        except Exception as exc:
+            raise RuntimeError(f"Unable to connect to REDIS_URL={redis_url!r}: {exc}") from exc
+
+    logger.info(
+        "Startup checks passed. Environment and runtime dependencies are valid.",
+        extra={"run_id": "system"},
+    )
 
 
 def main() -> int:

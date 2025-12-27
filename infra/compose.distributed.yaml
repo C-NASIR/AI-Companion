@@ -1,0 +1,85 @@
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  backend:
+    build:
+      context: ../backend
+    env_file:
+      - ../.env
+    environment:
+      - BACKEND_MODE=distributed
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+    ports:
+      - "8000:8000"
+    command:
+      - uvicorn
+      - app.main:create_app
+      - --factory
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --workers
+      - "2"
+    volumes:
+      - ../backend:/app
+
+  workflow-worker:
+    build:
+      context: ../backend
+    env_file:
+      - ../.env
+    environment:
+      - BACKEND_MODE=distributed
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+    command:
+      - python
+      - -m
+      - app.worker.workflow_worker
+    volumes:
+      - ../backend:/app
+
+  tool-worker:
+    build:
+      context: ../backend
+    env_file:
+      - ../.env
+    environment:
+      - BACKEND_MODE=distributed
+      - REDIS_URL=redis://redis:6379/0
+      - TOOL_QUEUE_CONSUMER_NAME=tool-worker
+    depends_on:
+      - redis
+    command:
+      - python
+      - -m
+      - app.worker.tool_worker
+    volumes:
+      - ../backend:/app
+
+  frontend:
+    build:
+      context: ../frontend
+    depends_on:
+      - backend
+    environment:
+      - NEXT_PUBLIC_BACKEND_URL=http://backend:8000
+      - NODE_ENV=development
+    ports:
+      - "3000:3000"
+    command:
+      - npm
+      - run
+      - dev
+    volumes:
+      - ../frontend:/app
+
