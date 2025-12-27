@@ -1,425 +1,267 @@
 # AI Companion
 
-Session 6 keeps the event-driven backbone and knowledge foundation from earlier sessions but now routes every tool interaction through a Model Context Protocol (MCP) boundary with dynamic discovery, centralized permissions, and explicit provenance. Every backend startup still ingests the markdown corpus under `backend/data/docs`, yet intelligence now consults the MCP registry during planning, emits `tool.discovered` / `tool.requested` / `tool.denied` events, and the UI surfaces standardized tool metadata (name, scope, and source) together with denial messaging so users understand why a capability was or was not used.
+An event-driven “AI agent in a box” you can run locally: chat UI + FastAPI backend with retrieval, a durable workflow engine, Model Context Protocol (MCP) tool execution, guardrails, tracing, and a deterministic evaluation harness.
 
-## Repository layout
+Use it as a reference implementation for building observable, controllable agentic systems (and as a sandbox for experimenting with workflows, tool policies, and safety layers).
 
-- `backend/` – FastAPI app (entrypoint `app/main.py`, routes in `app/api.py`, coordinator + event primitives under `app/`).
-- `frontend/` – Next.js 14 App Router UI with Tailwind styling and streaming hooks/components.
-- `backend/data/events` – JSONL event logs (one file per `run_id`, created automatically).
-- `backend/data/state` – `RunState` snapshots persisted after every node.
-- `backend/data/traces` – Session 8 trace files (`{run_id}.json`) with the trace envelope plus every span.
-- `backend/app/eval` – Session 9 evaluation scaffolding (dataset, runner, scorers, report, gate, CLI) that replays full intelligence runs deterministically.
-- `backend/data/eval` – Reserved for evaluation artifacts (latest `report.json`, per-case trajectory exports) consumed by CI and local developers.
-- `infra/compose.yaml` – Single-process Docker Compose stack.
-- `infra/compose.distributed.yaml` – Distributed-mode stack (Redis + web + workers).
-- `docs/` – Project overview, per-session prompts, and the Session 5 implementation plan.
-- `backend/data/docs` – Authoritative markdown corpus that ingestion reads on startup. Stable filenames become `document_id` values inside chunk metadata.
+---
 
-## Prerequisites
+## Contents
 
-- Python 3.11+
-- Node.js 18+ and npm
-- Docker + Docker Compose (for the one-command run flow)
-- (Optional) OpenAI API key for live streaming. Without it the backend emits a deterministic fake response.
-- (Optional) `GITHUB_TOKEN` for the external GitHub MCP server. Leave unset to exercise permission denial paths; when provided it enables `github.list_files` and `github.read_file`.
+- [What It Does](#what-it-does)
+- [How It Works](#how-it-works)
+- [Quickstart (Docker)](#quickstart-docker)
+- [Local Development](#local-development)
+- [Distributed Mode](#distributed-mode)
+- [Observability (Events + Traces)](#observability-events--traces)
+- [Guardrails](#guardrails)
+- [Evaluation Suite](#evaluation-suite)
+- [Configuration](#configuration)
+- [Troubleshooting](#troubleshooting)
 
-## Environment configuration
+---
 
-1. Copy `.env.example` to `.env` and tweak values for your environment. Key variables:
+## What It Does
 
-| Variable | Purpose |
-| --- | --- |
-| `MODEL_ROUTING_DEFAULT_MODEL` | Default model id used by the router for any capability not explicitly overridden. |
-| `MODEL_PRICE_DEFAULT_INPUT_USD`, `MODEL_PRICE_DEFAULT_OUTPUT_USD` | Per-token pricing used for cost estimation and budget enforcement. |
-| `RATE_LIMIT_GLOBAL_CONCURRENCY`, `RATE_LIMIT_TENANT_CONCURRENCY` | Concurrency caps for all tenants and individual tenants respectively. |
-| `RUN_MODEL_BUDGET_USD` | Per-run USD budget cap (0 disables the guard). |
-| `CACHE_RETRIEVAL_ENABLED`, `CACHE_TOOL_RESULTS_ENABLED` | Feature flags for the intent-aware caches. |
-| `NEXT_PUBLIC_BACKEND_URL` | Used by the frontend to reach the backend during local dev. |
-| `NEXT_PUBLIC_TENANT_ID`, `NEXT_PUBLIC_USER_ID` | Default identity filled into the chat form (can still be edited per run). |
+**AI Companion** runs an end-to-end “chat run” that is fully observable via streamed events:
 
-2. Run the startup validator before launching the backend (this also runs automatically inside Docker):
+- Accepts a message (+ optional context + mode)
+- Plans what to do (answer directly, request a tool, ask for clarification, etc.)
+- Retrieves evidence from a local markdown corpus
+- Streams model output (or a deterministic local fallback when no API key is set)
+- Optionally executes tools via **MCP** with explicit permissions and structured results
+- Verifies grounding/citations and finalizes the run
+- Persists state, events, and traces for replay/debugging
 
-```bash
-cd backend
-python -m app.startup_checks
+The frontend shows:
+
+- Live output stream
+- Workflow / node progress
+- Decisions (plan type, tool selection, retrieval info, verification)
+- Tools discovered/used + denial reasons
+- Guardrail interventions
+- Trace inspector timeline (`/runs/<run_id>/inspect`)
+
+---
+
+## How It Works
+
+### Core idea: everything is an event
+
+The backend persists and streams a **single source of truth**: events written to an event store and emitted over SSE. The UI is driven entirely by those events—no hidden client-side state machine.
+
+### Typical flow
+
+```mermaid
+sequenceDiagram
+  participant UI as Frontend (Next.js)
+  participant API as Backend API (FastAPI)
+  participant WF as Workflow Engine
+  participant R as Retrieval
+  participant M as Model
+  participant T as Tools (MCP)
+
+  UI->>API: POST /runs (message, context, mode)
+  API->>WF: start workflow
+  API-->>UI: run_id + SSE stream (/runs/<id>/events)
+
+  WF->>R: retrieve evidence
+  WF->>M: respond (stream output chunks)
+  alt tool needed
+    WF->>T: tool.requested
+    T-->>WF: tool.completed/tool.failed/tool.denied
+  end
+  WF-->>UI: run.completed/run.failed (final_text)
 ```
 
-The script fails fast if required env vars are missing, directories are not writable, or numeric values are malformed. Set `SKIP_STARTUP_CHECKS=1` only when running tests that do not touch the server.
+### Building blocks
 
-## Run everything with Docker Compose
+- **Workflow engine**: durable step model with retries and “waiting” states (e.g., tool results, human approval).
+- **Retrieval**: ingests markdown docs under `backend/data/docs`, chunks them, embeds them, and serves top-k similarity results.
+- **Tools (MCP)**: registry + client + executor. Tools declare schemas and a permission scope; the executor enforces policies and emits structured lifecycle events.
+- **Guardrails**: input/context/output/tool layers that can block unsafe behavior and emit clear, inspectable events.
+- **Tracing**: spans for workflow steps, nodes, model calls, tool calls, waits, retries, etc.
+
+---
+
+## Quickstart (Docker)
+
+Prereqs:
+
+- Docker + Docker Compose
+
+1) Create an env file:
+
+```bash
+cp .env.example .env
+```
+
+2) Start the stack:
 
 ```bash
 docker compose -f infra/compose.yaml up --build
 ```
 
-## Run distributed mode (Docker Compose)
+Open:
 
-Distributed mode runs the backend as a stateless-ish web API and moves workflow/tool execution into dedicated workers.
+- Frontend: http://localhost:3000
+- Backend: http://localhost:8000/health
 
-```bash
-docker compose -f infra/compose.distributed.yaml up --build
-```
+Notes:
 
-See `docs/distributed_runbook.md` for roles and operational notes.
+- The backend persists artifacts under `backend/data/` (events/state/workflow/traces).
+- **By default, data is not wiped on startup.** If you want the old “reset every boot” behavior inside the backend container, set `CLEAR_DATA_ON_STARTUP=1`.
 
-Ports:
+---
 
-- Frontend at http://localhost:3000 (Next.js dev server with hot reload)
-- Backend at http://localhost:8000 (Uvicorn `--reload`)
+## Local Development
 
-Stop with `CTRL+C`. The backend entrypoint still clears `backend/data/events` and `backend/data/state` on startup/shutdown, but the repository itself is bind-mounted into both containers. That means any code change you make locally is reflected immediately in the running containers without rebuilding; the backend auto-restarts, and the frontend dev server hot reloads the UI.
+Prereqs:
 
-> Tip: run `npm install` inside `frontend/` once on the host so `node_modules/` exists for the bind mount. The containers reuse that directory for faster restarts.
+- Python 3.11+
+- Node.js 18+
 
-> Note: The Dockerfiles use pinned base images (`python:3.11.8-slim-bullseye` and `node:20.15.1-alpine3.19`) plus `pip`/`npm ci` installs, so builds are reproducible across machines.
-
-## Local development workflow
-
-Backend:
+### Backend
 
 ```bash
 cd backend
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn app.main:create_app --factory --reload --port 8000
+
+python -m app.startup_checks
+uvicorn app.main:create_app --factory --reload
 ```
 
-Frontend:
+### Frontend
 
 ```bash
 cd frontend
 npm install
+npm run dev
+```
+
+If you run frontend on `:3000`, set:
+
+```bash
 NEXT_PUBLIC_BACKEND_URL=http://localhost:8000 npm run dev
 ```
 
-Visit http://localhost:3000 and use the UI. When you click **Send**, the browser logs the generated `run_id`, POSTs to `/runs`, immediately opens an SSE connection to `/runs/{run_id}/events`, and keeps all UI state in sync with replayed timeline events. Refreshing mid-run reconnects using the stored `run_id` and replays history before live updates resume.
+---
 
-Every run now includes tenant/user identifiers from the Chat form. Populate those fields with the tenant you are simulating—rate-limiting, caching, logging, and observability are all keyed by the identity you provide.
+## Distributed Mode
 
-### Knowledge ingestion & retrieval
+Distributed mode runs:
 
-1. Place 3–5 markdown files inside `backend/data/docs`. The filename is treated as the immutable `document_id` and the first Markdown header becomes the document title in metadata. Keep filenames stable so previously cited chunk ids remain valid.
-2. On backend startup, `backend/app/ingestion.py` loads every document, chunks text into ~500 character windows (100 character overlap), generates embeddings (OpenAI embeddings when `OPENAI_API_KEY` is present, otherwise a deterministic fake vector), and stores the chunk payloads through `backend/app/retrieval.py`.
-3. Ingestion emits `knowledge.ingestion.started` / `knowledge.ingestion.completed` events with counts so you can trace corpus refreshes in the log. Failures log under the synthetic run id `knowledge-ingestion`.
-4. The intelligence graph runs `receive → plan → retrieve → respond → verify → finalize`. The `retrieve` node emits `retrieval.started` and `retrieval.completed` events, stores structured chunk data in `RunState.retrieved_chunks`, and drives the new steps panel entries.
-5. The respond node always sees an explicit evidence list. When chunks exist, they are formatted as a numbered list with chunk ids and passed verbatim to the model along with instructions to cite ids inline. When no chunks are retrieved it instructs the model to reply “I lack sufficient evidence to answer.”
-6. Verification parses the streamed output, ensures at least one chunk id is cited whenever retrieval succeeded, and rejects answers that mention unknown chunks via reasons `missing_citations` or `invalid_citation`.
-7. The frontend fetches the persisted RunState after completion, parses cited chunk ids, and renders a Sources section with document titles, chunk ids, and expandable chunk previews. If retrieval never ran or returned zero chunks the panel shows “No sources were used for this answer.”
+- Backend API (stateless-ish)
+- Workflow worker (drives workflows)
+- Tool worker (executes tool requests)
+- Redis (event fanout + durable tool queue)
 
-### Tool connectivity, MCP, and permissions
-
-1. `backend/app/mcp/` hosts the MCP schema models (`schema.py`), registry (`registry.py`), client (`client.py`), abstract server contract (`server.py`), and concrete servers under `servers/`. Two servers are registered at startup: `CalculatorMCPServer` (local arithmetic) and `GitHubMCPServer` (read-only repo access via the GitHub REST API and the `GITHUB_TOKEN` env var).
-2. `backend/app/permissions.py` defines a `PermissionGate` and `PermissionContext` that enforce scopes mechanically outside of intelligence. Calculators are always allowed, `github.read` is allowed only in `development`, and any future scope defaults to deny.
-3. `backend/app/intelligence.py` planning consults the allowed set via the registry + permission gate, emits `tool.discovered` decision data, records `tool_selected`, and requests a tool directly from the plan node (transitioning into the waiting phase). Respond only streams model output when no tool was selected.
-4. `backend/app/executor.py` subscribes to `tool.requested`, validates descriptors, runs the permission gate, emits `tool.denied` (without contacting the server) when scopes are disallowed, and routes execution through the MCP client when permitted. Server-level failures emit `tool.server.error` before the usual `tool.failed`.
-5. `RunState` now stores `available_tools`, `requested_tool`, `tool_source`, `tool_permission_scope`, and `tool_denied_reason`. All MCP events are persisted so replay clearly shows which tools existed, which server provided them, and why a request did or did not run.
-6. The UI steps panel tracks “Tool discovered → Tool requested → Tool executed → Tool denied” progress from event data. The Response panel includes a tool provenance card that lists every discovered tool plus the currently requested tool with source/scope metadata, and displays the mandated denial message (“Tool X was not permitted in this context”) whenever the backend emits `tool.denied`.
-
-### Manual curl flow
-
-1. Generate an id and start a run:
-
-   ```bash
-   RUN_ID=$(python3 - <<'PY'
-import uuid
-print(uuid.uuid4())
-PY
-)
-   curl -s -X POST \
-     -H "Content-Type: application/json" \
-     -H "X_Run_Id: $RUN_ID" \
-     -d '{"message":"walk me through the control graph","mode":"answer"}' \
-     http://localhost:8000/runs
-   echo "Run started: $RUN_ID"
-   ```
-
-2. Subscribe to its timeline (replay + live):
-
-   ```bash
-   curl -N http://localhost:8000/runs/$RUN_ID/events
-   ```
-
-3. Inspect the latest `RunState` snapshot:
-
-   ```bash
-   curl http://localhost:8000/runs/$RUN_ID/state | jq
-   ```
-
-Feedback stays the same: POST to `/feedback` with the `run_id`, score, reason (for 👎), and final text after the run completes.
-
-## Environment variables
-
-- `OPENAI_API_KEY` (optional) – enables live streaming via the OpenAI SDK.
-- `OPENAI_BASE_URL` (optional) – override the API base URL.
-- `OPENAI_MODEL` (optional) – default `gpt-4o-mini`.
-- `OPENAI_EMBEDDING_MODEL` (optional) – default `text-embedding-3-small`, used by the ingestion pipeline when generating embeddings.
-- `NEXT_PUBLIC_BACKEND_URL` – frontend uses this to locate the backend (automatically set inside Docker, configure manually for local dev).
-
-## Event schema, timeline, and intelligence graph observability
-
-- Content type: `text/event-stream`
-- Every SSE message contains compact JSON (one per line) with this envelope:
-
-```json
-{
-  "id": "94cf3eed-3521-4e44-b3ec-68d3a62d4064",
-  "run_id": "6a8f0582-2c80-4ff4-b7ee-821f12d6de0b",
-  "seq": 12,
-  "ts": "2024-06-07T18:41:20.109486+00:00",
-  "type": "node.started",
-  "data": { "name": "respond" }
-}
-```
-
-- Event types emitted in Session 3:
-  - `run.started`, `run.completed`, `run.failed`
-  - `node.started`, `node.completed`
-  - `decision.made`
-  - `status.changed`
-  - `output.chunk`
-  - `error.raised`
-- Session 4 introduces structured tool lifecycle events:
-  - `tool.requested` with `{ "tool_name": "...", "arguments": { ... } }`
-  - `tool.completed` with `{ "tool_name": "...", "output": { ... }, "duration_ms": <int> }`
-  - `tool.failed` with `{ "tool_name": "...", "error": { ... }, "duration_ms": <int> }`
-- Session 5 extends the log with knowledge events:
-  - `knowledge.ingestion.started` / `knowledge.ingestion.completed` for startup pipelines.
-  - `retrieval.started` records the query text/length for the run.
-  - `retrieval.completed` includes `{ "number_of_chunks": <int>, "chunk_ids": ["doc.md::000", ...] }`.
-- Status payloads keep the Session 2 values (`received | thinking | responding | complete`).
-- Node events include `{ "name": "receive|plan|respond|verify|finalize" }`. The frontend maps those to the steps panel; no synthetic UI state exists.
-- Decision events now cover `plan_type`, `response_strategy`, `retrieval_chunks`, `grounding`, `verification`, `outcome`, `tool_intent`, and `tool_result`, each with optional `notes`.
-- `output.chunk` streams deterministic text chunks (either OpenAI output or the fallback response). `run.completed` or `run.failed` carries `{ "final_text": "...", "reason": "<optional>" }`.
-
-Implementation references: event primitives live in `backend/app/events.py`, the coordinator is `backend/app/coordinator.py`, node logic is in `backend/app/intelligence.py`, and the frontend consumes the SSE feed via the hook in `frontend/hooks/useChatRun.ts` which uses `subscribeToRunEvents` from `frontend/lib/backend.ts`.
-
-RunState snapshots (`backend/data/state/<run_id>.json`) now include `tool_requests`, `tool_results`, and `last_tool_status`, preserving the history of each tool invocation during Session 4 runs.
-
-Session 4 also adds a dedicated tool registry at `backend/app/tools.py`. Tools declare Pydantic schemas for inputs/outputs/errors, live in a central registry, and expose deterministic execute functions. The initial tool is a `calculator` with operations `add|subtract|multiply|divide`.
-
-## Tool execution (Session 4)
-
-- The respond node scans for simple arithmetic intents (e.g., “what is 2 + 3” or “add 5 and 7”), records a `tool_intent` decision, and, when applicable, emits a `tool.requested` event (`calculator` with parsed arguments) instead of streaming a model response.
-- `backend/app/executor.py` hosts the `ToolExecutor`, which subscribes to the shared `EventBus`, validates requests via the registry, executes the tool, and emits `tool.completed` or `tool.failed` events with structured payloads and execution duration.
-- `RunCoordinator` watches those events, updates `RunState.tool_results`, emits `tool_result` decision events, and either resumes at `verify` (on success) or skips straight to `finalize` with a failure outcome.
-- Verify/finalize nodes summarize tool output for the user (“The result is X.”) and surface failures without exposing raw tool payloads.
-- The frontend steps panel shows “Tool requested → Tool executing → Tool completed/failed” progress driven exclusively by the new event types, and the decision log displays both `tool_intent` and `tool_result`.
-
-All events are appended to `backend/data/events/<run_id>.jsonl`, so you can replay any run later with `cat backend/data/events/<run_id>.jsonl`. RunState snapshots at `backend/data/state/<run_id>.json` store the same information in structured form.
-
-## Inspecting the intelligence layer
-
-- The intelligence graph (`receive → plan → retrieve → respond → verify → finalize`) is defined explicitly in `backend/app/intelligence.py`. Each node emits its own lifecycle/status/decision/output events and persists the RunState snapshot upon completion. The retrieve node stores structured chunks on the RunState, respond streams model output with evidence instructions, and verify enforces grounding before the final outcome.
-- `backend/app/coordinator.py` now bridges HTTP requests, tool events, and the workflow engine instead of running the graph directly. Every step transition is persisted in the workflow store and mirrored through `workflow.*` events so the execution order remains fully observable after restarts.
-- The frontend displays the current status, per-node progress, output chunks, and decision log entirely from the streamed events. No hidden client-side state machines exist.
-
-## Session 7 – Durable workflows
-
-Session 7 replaces the transient coordinator loop with a workflow engine that persists every transition under `backend/data/workflow/<run_id>.json`. The engine maps each intelligence node to an idempotent activity, enforces retry policies (`respond` and `retrieve` back off before exhausting attempts), pauses cleanly for human approval, and resumes from durable state after crashes or restarts. New workflow events (`workflow.step.started`, `workflow.retrying`, `workflow.waiting_for_event`, `workflow.waiting_for_approval`, etc.) show up in the event log and power the frontend’s workflow status card.
-
-### Crash-test durability
-
-1. Start the backend (`uvicorn app.main:create_app --factory --reload` or `docker compose up`) and kick off a run that streams for a few seconds (e.g., a question that triggers retrieval/respond).
-2. Tail the workflow events: `tail -f backend/data/events/<run_id>.jsonl | rg workflow`.
-3. After you see `workflow.step.started` for `respond` or `retrieve`, kill the backend process (CTRL+C or `docker compose stop backend`).
-4. Restart the backend. On boot it reloads `RunState` + `WorkflowState`, observes pending steps, and emits `workflow.step.started` again without duplicating prior output/tool effects.
-5. Refresh the UI – it fetches `/runs/<run_id>/workflow` to rebuild the workflow summary, reconnects to SSE, and continues streaming from the resumed step.
-6. Repeat the test during tool execution or approval pauses to confirm retries, tool dedupe, and approvals all survive restarts.
-
-### Workflow + approval APIs
-
-- `GET /runs/{run_id}/workflow` returns the persisted workflow state (current step, attempts, pending events, approval flags) so you can inspect or debug a run outside the UI.
-- `POST /runs/{run_id}/approval` with `{"decision":"approved"}` or `{"decision":"rejected"}` records the human decision and causes the workflow engine to resume the paused step.
-- The frontend renders a dedicated Approval Gate with Approve / Reject buttons whenever the workflow emits `workflow.waiting_for_approval`.
-
-## Session 8 – Traces and observability
-
-- Every run now creates a durable trace under `backend/data/traces/{run_id}.json`. Each file stores the trace envelope plus every span (workflow steps, intelligence nodes, tools, model calls, waits, and retries) so you can replay timelines after restarts.
-- Read-only endpoints expose this data: `GET /runs/{run_id}/trace` returns the combined trace/spans payload, while `GET /runs/{run_id}/spans` streams spans only. The frontend’s inspector as well as CLI tooling use these routes.
-- The main UI status card surfaces a thin slice of tracing signals. You will now see explicit messaging when the system is retrying a step, waiting for approval, blocked on an MCP tool, or waiting on retrieval to finish. These hints are derived directly from the workflow spans and stay in sync with the backend.
-- While a run is in flight the frontend polls `/runs/{run_id}/spans` every few seconds, extracts spans with `status=retried` or `status=waiting`, and renders banner chips (“Retry scheduled”, “Waiting for approval”, “Tool running”, “Retrieval pending”). No stack traces or raw errors leak to users—only high-level span metadata.
-- A developer-only Run Inspector lives at `http://localhost:3000/runs/<run_id>/inspect` (there’s also a link on the status card once a run starts). It fetches the stored trace, renders a timeline with parent/child indentation, shows detailed span metadata, and summarizes workflow steps so you can explain any run in minutes—no log tailing required.
-- Typical flow: kick off a run, copy the printed `run_id` (also shown in the UI), open the inspector route in a new tab, and refresh as needed. The trace persists even if you restart the backend, making yesterday’s failures just as inspectable as today’s.
-
-### Trace persistence crash test
-
-1. Start the backend (local or via Docker Compose) and trigger a run that will take a few seconds (tool invocation, retrieval, etc.). Copy the `run_id` from the UI status card.
-2. Tail the trace file while the run is still executing: `jq . backend/data/traces/<run_id>.json` — new spans are appended as soon as they start/end.
-3. Kill the backend (`CTRL+C` or `docker compose stop backend`) before the run finishes. The workflow engine persists `WorkflowState` plus the trace file is already on disk.
-4. Restart the backend. As soon as the workflow resumes, open `http://localhost:3000/runs/<run_id>/inspect` or call `curl http://localhost:8000/runs/<run_id>/trace`. You should see all pre-crash spans intact.
-5. Let the run finish. Re-open the same inspector view—the final spans (retry, wait, finalize, etc.) append to the existing JSON file without overwriting prior data. Repeat the test the next day to confirm “yesterday’s run” is still inspectable without re-running anything.
-
-### Retention / cleanup
-
-Trace files are plain JSON documents under `backend/data/traces` and are not automatically pruned. When running long-lived environments, use the helper script to remove older files:
+Start it with:
 
 ```bash
-python backend/scripts/purge_traces.py --days 14          # delete traces older than 14 days
-python backend/scripts/purge_traces.py --days 30 --dry-run  # preview deletions without removing files
+docker compose -f infra/compose.distributed.yaml up --build
 ```
 
-The script defaults to the repository’s `backend/data/traces` directory but accepts `--traces-dir` if you mount data elsewhere (e.g., inside Docker volumes).
+Operational notes and validation steps live in:
 
-### Observability quick reference
+- `docs/distributed_runbook.md`
+- `docs/distributed_validation_checklist.md`
 
-| Artifact | Location / API | Notes |
-| --- | --- | --- |
-| Trace files | `backend/data/traces/{run_id}.json` | Contains `{trace, spans}`; safe to inspect offline. |
-| Full trace API | `GET /runs/{run_id}/trace` | Returns the JSON payload used by the inspector. |
-| Span-only API | `GET /runs/{run_id}/spans` | Useful for lightweight polling (the frontend uses this for Status card alerts). |
-| Run inspector | `http://localhost:3000/runs/{run_id}/inspect` | Dev-only route; also linked from the Status card once a run starts. |
+---
 
-Error types follow the Session 8 classification (e.g., `network_failure`, `bad_plan`, `permission_denied`). You can filter spans by `attributes.error_type` to separate intelligence failures from system issues. All spans share the same `trace_id`, and parent-child relationships mirror real execution order—if a span lacks its parent, treat it as an observability bug.
+## Observability (Events + Traces)
 
-### Cost observability (Session 11 Phase 1)
+### Events (SSE)
 
-- Every model span now records `model_name`, `input_token_count`, `output_token_count`, and `estimated_cost_usd`. These values surface in `backend/data/traces/{run_id}.json` and via `GET /runs/{run_id}/trace`.
-- Run-level totals are stored under `trace.totals` (cost, model calls, input tokens, output tokens). When a run finishes the backend emits `cost.aggregated` with the same numbers so operators can watch for budget spikes via SSE or logs.
-- Configure pricing with environment variables: `MODEL_PRICE_DEFAULT_INPUT_USD` / `MODEL_PRICE_DEFAULT_OUTPUT_USD` set global fallbacks, while `MODEL_PRICE_<MODEL>_INPUT_USD` and `MODEL_PRICE_<MODEL>_OUTPUT_USD` override a specific model (slugify the model name to uppercase and replace non-alphanumerics with `_`, e.g., `MODEL_PRICE_GPT_4O_MINI_INPUT_USD=0.000002`).
-- Example 1: set `MODEL_PRICE_DEFAULT_INPUT_USD=0.000002` and `MODEL_PRICE_DEFAULT_OUTPUT_USD=0.000004`. If a run consumes 6 prompt tokens and 18 completion tokens, the recorded cost is `0.00006 USD` and the `cost.aggregated` event will report `total_cost_usd: 0.00006`.
-- Example 2: set `MODEL_PRICE_GPT_4O_MINI_INPUT_USD=0.0000015` and `MODEL_PRICE_GPT_4O_MINI_OUTPUT_USD=0.000003`. With 10 prompt tokens and 8 completion tokens on that model, the run logs `estimated_cost_usd: 0.000042` for the span and the summary event carries the same amount while leaving defaults untouched for other models.
+- `GET /runs/<run_id>/events` streams replay + live events as Server-Sent Events.
+- Events are also persisted so you can replay runs later.
 
-### Model routing (Session 11 Phase 2)
+### Run state
 
-- Intelligence code now requests `ModelCapability` values (`planning`, `generation`, `verification`, `classification`) and the backend routes them through `backend/app/models/router.py`.
-- Configure routing with environment variables: set `MODEL_ROUTING_DEFAULT_MODEL` for the baseline and override specific capabilities via `MODEL_ROUTING_<CAPABILITY>_MODEL` (e.g., `MODEL_ROUTING_PLANNING_MODEL=gpt-4o-mini`, `MODEL_ROUTING_VERIFICATION_MODEL=gpt-4o`). Slugs use uppercase capability names.
-- Inspect `trace.spans[].attributes.model_capability` and `model_name` (e.g., via `/runs/{id}/trace` or the Run Inspector) to confirm the router selected the intended model for each span.
-- Update the env vars and restart the backend to shift routing—no intelligence-layer changes are required.
+- `GET /runs/<run_id>/state` returns the latest `RunState` snapshot (tools, retrieval, guardrails, etc.).
+- `GET /runs/<run_id>/workflow` returns durable workflow state.
 
-### Intent-aware caching (Session 11 Phase 3)
+### Traces
 
-- Retrieval lookups are cached in-memory based on `(query, corpus_version, top_k)`. `corpus_version` is derived from the ingested docs hash (`backend/app/knowledge.py`) and changes automatically whenever ingestion reloads content.
-- Tool responses for side-effect-free (“read”) scopes are cached by `(tool_name, arguments)` so repeated safe calls re-use structured outputs immediately.
-- `CACHE_RETRIEVAL_ENABLED` and `CACHE_TOOL_RESULTS_ENABLED` (default `true`) toggle each layer. When enabled, the backend emits `cache.hit` / `cache.miss` events with hashed keys plus metadata, and spans gain `retrieval_cache` / `cache_status` attributes so traces clearly show whether caches were used.
-- Cache invalidation happens transparently: a new `corpus_version` results in fresh retrieval keys, and tool caches can be cleared by restarting the backend (in-memory store). Production deployments can swap in a different `CacheStore` implementation if persistence or TTLs are required.
+- `GET /runs/<run_id>/trace` returns the full trace (envelope + spans).
+- `GET /runs/<run_id>/spans` returns spans only.
+- Frontend inspector: `http://localhost:3000/runs/<run_id>/inspect`
 
-### Tenant isolation (Session 11 Phase 4)
+---
 
-- `POST /runs` accepts an optional `identity` block (`tenant_id`, `user_id`). When omitted, the backend falls back to `default/anonymous`, but production callers should always send explicit identifiers.
-- `RunState`, logs, events, and traces carry `tenant_id`/`user_id` so you can filter timelines per tenant. Every emitted event automatically includes these fields, and log lines inherit them via `RunState.log_extra()`.
-- Retrieval/tool caches are partitioned per tenant. Keys now include `tenant_id`, `corpus_version`, etc., ensuring that no tenant reuses another tenant’s cached retrieval chunks or tool outputs.
-- Tool executor enforces guardrails and emits cache events with identity metadata; cache hits produce `duration_ms=0` entries so you can see the savings per tenant in traces/SSE streams.
-- Internally generated system runs (e.g., ingestion, evaluations) use synthetic tenants (`knowledge-ingestion`, `evaluation`) so they cannot interfere with user workloads.
+## Guardrails
 
-### Rate limiting & degradation (Session 11 Phase 5)
+Guardrails are layered controls that can refuse/stop execution and explain why:
 
-- Concurrency guardrails block noisy tenants before a workflow starts. Configure limits via `RATE_LIMIT_GLOBAL_CONCURRENCY` and `RATE_LIMIT_TENANT_CONCURRENCY`. When exceeded, the backend emits `rate.limit.exceeded` (scope `run_start`) and responds with HTTP 429 (client should retry later).
-- Per-run model spend is capped via `RUN_MODEL_BUDGET_USD`. Each OpenAI invocation records cost; once the limit is exceeded the run emits `rate.limit.exceeded` (scope `model_budget`), refuses with reason `budget_exhausted`, and the workflow short-circuits safely.
-- Retrieval failures no longer hard-stop runs. Instead, the backend enters degraded mode (`degraded.mode.entered` events, `RunState.degraded=true`), continues execution without context, and surfaces the degraded reason to the UI.
-- Rate-limit and degraded signals flow through events, traces, and log extras (`tenant_id`/`user_id`), enabling ops to throttle or debug specific tenants without guessing which run triggered an alert.
+- Input gate (pre-run safety checks)
+- Retrieval context sanitization
+- Prompt injection detection
+- Output validation
+- Tool firewall (permission + schema + rate limiting)
 
-### Operational runbooks
+Guardrail interventions emit events like:
 
-- **Estimate cost per run** – Inspect `trace.totals` via `/runs/<id>/trace` or the Run Inspector; the frontend does not expose dollar amounts but every span includes `estimated_cost_usd`.
-- **Identify expensive spans** – Sort spans by `estimated_cost_usd` within the Inspector to find the nodes driving budgets. Cache attributes (`cache_status`) highlight opportunities to eliminate misses.
-- **Runs that stall** – `StatusCard` surfaces pending tools/retrieval. For deeper debugging, inspect `workflow.waiting_for_event` events to see which SSE events are awaited.
-- **Costs spike** – Watch for `rate.limit.exceeded` with `scope=model_budget`. Either raise `RUN_MODEL_BUDGET_USD`, trim prompts, or increase caching effectiveness before re-running.
-- **Tool failures** – Every denial/failure produces a tool alert in the UI plus the usual `tool.*` events. Inspect the corresponding tool server log or disable the tool temporarily.
-- **Disable a tool safely** – Remove it from `backend/app/mcp/servers/*` or tighten `PermissionGate`; the planner now lists remaining tools automatically and surfaces denial reasons in the UI.
-- **Throttle a noisy tenant** – Drop `RATE_LIMIT_TENANT_CONCURRENCY` or adjust the tenant id/server identity to a more restrictive account. The UI always displays which tenant/user triggered a run so throttling is data-driven.
+- `guardrail.triggered`
+- `context.sanitized`
+- `injection.detected`
 
-### Boring operation soak test
+---
 
-Exercise the full stack for hours (or days) using the deterministic evaluation dataset:
+## Evaluation Suite
+
+The evaluation harness replays runs deterministically against a dataset and scores behavior (retrieval, grounding, tool behavior, verification).
+
+Run it:
 
 ```bash
 cd backend
-python -m app.startup_checks
-python scripts/boring_operation_test.py --duration-minutes 60
+python -m app.eval.run
 ```
 
-The script replays every evaluation case until the duration or iteration budget is met, reporting total runs, failures, degraded runs, and latency percentiles. For a 24‑hour soak, pass `--duration-minutes 1440`. Use the summarized stats plus the emitted `rate.limit.exceeded` / `degraded.mode.entered` events to verify the system can run “boringly” with no manual intervention.
+Artifacts:
 
-## Operational runbooks
+- `backend/data/eval/report.json`
+- Per-case results under `backend/data/eval/cases/`
 
-### Estimate cost per run
-- Open the Run Inspector or call `GET /runs/{run_id}/trace`; the `trace.totals` block contains `total_cost_usd`, `total_model_calls`, and token counts.
-- The frontend also surfaces per-span `estimated_cost_usd` attributes, so you can quickly understand which phase consumed most of the budget without showing end users dollar amounts.
+---
 
-### Identify expensive spans
-- In the inspector, filter spans by `attributes.estimated_cost_usd` (descending) or search for `model.` spans—each span records `model_name`, input/output token counts, and estimated spend.
-- Cross-check with `cache_status` attributes: repeated “miss” values usually flag redundant work you can optimize.
+## Configuration
 
-### When runs stall
-- Watch `spanAlerts` and the new operational banner: “Waiting on tool” or “Retrieval pending” indicates the workflow is in a wait-state. For deeper debugging inspect `workflow.waiting_for_event` events to see the exact event types.
-- If a run remains stalled, cancel it from the Run Inspector and review the responsible tool or MCP server before re‑enabling traffic.
+Copy `.env.example` → `.env`. Key variables:
 
-### When costs spike
-- Look for `rate.limit.exceeded` events with `scope=model_budget`—those indicate the per-run cap is firing. Adjust `RUN_MODEL_BUDGET_USD`, reduce prompt size, or cache more aggressively before re-running.
-- To compare tenants, group Run Inspector traces by `tenant_id` and examine `trace.totals.total_cost_usd` to see which tenant is trending upward.
+| Variable | Purpose |
+| --- | --- |
+| `OPENAI_API_KEY` | Optional. Enables real model streaming; otherwise a deterministic fallback streamer is used. |
+| `MODEL_ROUTING_DEFAULT_MODEL` | Default model for routing. |
+| `MODEL_ROUTING_<CAPABILITY>_MODEL` | Override a capability model (e.g. `MODEL_ROUTING_VERIFICATION_MODEL`). |
+| `RUN_MODEL_BUDGET_USD` | Per-run spend cap (0 disables). |
+| `RATE_LIMIT_GLOBAL_CONCURRENCY` / `RATE_LIMIT_TENANT_CONCURRENCY` | Concurrency limits. |
+| `CACHE_RETRIEVAL_ENABLED` / `CACHE_TOOL_RESULTS_ENABLED` | Feature flags for caches. |
+| `BACKEND_MODE` | `single_process` (default) or `distributed`. |
+| `REDIS_URL` | Required when `BACKEND_MODE=distributed`. |
+| `NEXT_PUBLIC_BACKEND_URL` | Frontend → backend URL. |
+| `GITHUB_TOKEN` | Optional. Enables GitHub MCP tool calls (read-only). |
+| `CLEAR_DATA_ON_STARTUP` | Optional. Set to `1` to wipe `data/events` + `data/state` on container boot. |
 
-### When tools fail
-- The UI already highlights tool failures; grab the corresponding `tool.failed` event (with `tenant_id`/`user_id`) and inspect the tool server logs for stack traces.
-- If the failure recurs, disable the tool temporarily by removing it from the MCP registry (or set `tool_firewall_enabled=false`) and rerun until the fix is deployed.
+---
 
-### Disable a tool safely
-- Remove or comment out the tool registration in `backend/app/mcp/servers/*` or tighten the permission gate. The planner and executor now surface “Tool was not permitted” events immediately, keeping tenants informed.
-- Document the change in the README or ops channel so other operators know why it disappeared.
+## Troubleshooting
 
-### Throttle a noisy tenant
-- Use the tenant identity controls in the UI to reproduce the tenant’s runs, then adjust `RATE_LIMIT_TENANT_CONCURRENCY` or temporarily set their identity to a known throttled account.
-- For emergency throttling, reduce the global/tenant concurrency env vars and restart the backend; the rate limiter emits `rate.limit.exceeded` events so you can verify the noisy tenant was blocked.
+### “Startup check failed: Missing required environment variable …”
 
-## Validation checklist (Session 6)
+Ensure you copied `.env.example` to `.env` and are loading it (Docker does via `env_file`).
 
-1. **Runs outlive requests** – Start a run, close the tab, and tail `backend/data/events/<run_id>.jsonl`. The coordinator should keep appending events until `run.completed` or `run.failed` shows up.
-2. **UI reconstructs from events** – Trigger a run in the UI and refresh mid-flight. The page should reconnect (using the run id stored in `sessionStorage`), replay the timeline, and continue streaming live events without losing output or decisions.
-3. **Every step emits events** – Subscribe via `curl -N http://localhost:8000/runs/<run_id>/events` and confirm each node yields `node.started`/`node.completed`, `status.changed`, and, where relevant, `decision.made` + `output.chunk`.
-4. **Feedback ties to the timeline** – After completion, submit 👍 or 👎 (with a reason) and verify `backend/data/feedback.jsonl` records the entry with the correct `run_id`.
-5. **Trace discipline** – Browser console logs, backend logs, event files, and RunState snapshots should all contain the same `run_id`. Use `docker compose logs backend | grep <run_id>` to cross-check.
-6. **Tool lifecycle is observable** – Send “what is 2 + 3” (or similar). The respond node should emit `tool.requested`, the executor should append `tool.completed/tool.failed`, the steps panel should highlight the tool stages, and the decision log should show `tool_intent` followed by `tool_result`. The final message should summarize the tool outcome rather than dumping the raw tool payload.
-7. **Ingestion runs once per startup** – Start the backend and confirm logs show `knowledge.ingestion.started` / `knowledge.ingestion.completed`. Inspect `backend/data/events/knowledge-ingestion.jsonl` for the same events and verify chunk counts match the files under `backend/data/docs`.
-8. **Retrieval is visible** – Kick off a run and watch for `retrieval.started` / `retrieval.completed` in the SSE stream. The frontend steps panel should mark “Retrieval started” and “Retrieval completed” in order, and `RunState.retrieved_chunks` (via `/runs/<id>/state`) should list the chunk metadata stored for the run.
-9. **Grounded answers** – When retrieval returns chunks, the streamed output must cite chunk ids like `[internal_docs.md::000]`. Delete citations or alter chunk ids and rerun to confirm verification fails with `missing_citations` or `invalid_citation` and the run ends in a failure outcome. When retrieval returns zero chunks, the model should say it lacks sufficient evidence.
-10. **UI sources panel** – After a successful run, the Response panel should show a Sources section listing each cited chunk with document title, chunk id, and expandable preview. When no evidence was available (e.g., retrieval returned zero chunks) the panel should display “No sources were used for this answer.”
-11. **MCP discovery** – Start a run and watch the SSE stream for `tool.discovered` events before planning makes a decision. The steps panel should mark “Tool discovered” as soon as at least one tool is available, and `/runs/<id>/state` should list the same descriptors (with `source`, `permission_scope`, and `server_id`).
-12. **Permission enforcement** – Leave `GITHUB_TOKEN` unset and ask for GitHub data (e.g., “list files in repo octocat/Hello-World”). Planning should still discover the GitHub tools but the executor must emit `tool.denied` with reason `scope_not_allowed_environment`, the UI must display “Tool github.list_files was not permitted in this context,” and the run should finalize with a failure outcome without contacting GitHub.
-13. **External execution** – Provide a valid `GITHUB_TOKEN`, rerun the same request, and confirm `tool.executed` completes successfully, `tool.server.error` never fires, and the tool panel shows `source=external` with scope `github.read`. Disable the GitHub server in `backend/app/main.py` (comment out `GitHubMCPServer`) and verify no intelligence changes are required—the planner simply lists fewer discovered tools.
+### “Redis transport requested…” / worker won’t start
 
-See `docs/session_3_plan.md` and `docs/session_4_plan.md` for the implementation details and follow-up notes.
+Distributed mode requires Redis and `BACKEND_MODE=distributed` + `REDIS_URL` set.
 
-## Evaluation suite (Session 9)
+### Tools are discovered but denied
 
-Run the deterministic evaluation layer to guard against regressions:
+Tool execution is permission-gated. In development, calculator is allowed; GitHub tools also require a `GITHUB_TOKEN`.
 
-```bash
-cd backend
-python3 -m app.eval.run
-```
+### No output / UI looks stuck
 
-Key behavior:
-
-- Replays every case in `backend/app/eval/dataset.yaml` through the real workflow with `is_evaluation=true`.
-- Streams per-case results to the console, writes machine-readable output to `backend/data/eval/report.json`, and exits non-zero if any scorer fails.
-- `--case <id>` runs a subset of cases, `--timeout <seconds>` overrides per-case timeout, and `--allow-failures <n>` sets a temporary tolerance (default `0`).
-
-**Interpreting failures**
-
-1. Read the console report or inspect `backend/data/eval/report.json` to see which case/scorer failed.
-2. Use the referenced run id to open `backend/data/events/<run_id>.jsonl`, `backend/data/state/<run_id>.json`, or `backend/data/traces/<run_id>.json` for deeper debugging.
-3. Fix the responsible layer (planning, retrieval, execution, verification) rather than weakening expectations—evaluation is your regression safety net.
-
-**Adding cases**
-
-- Edit `backend/app/eval/dataset.yaml`. Every case needs a stable `id`, descriptive notes, and concrete expectations (retrieval/tool requirements, citation rules, verification behavior).
-- Keep the dataset deterministic and grounded in real scenarios; 30–60 cases is the target range enforced by the dataset loader.
-
-**Quarantining failures**
-
-- Only as a last resort, temporarily set `--allow-failures 1` when invoking the CLI and leave an inline comment documenting why the failure is tolerated. Never silently skip cases; the CI workflow should make quarantines visible.
-
-## Session 10 – Guardrails, sanitization, and safety UI
-
-Session 10 adds a multi-layer guardrail system that enforces safety before, during, and after intelligence executes:
-
-- **Threat model as code** – `backend/app/guardrails/` defines the threat taxonomy plus reusable modules (input gate, context sanitizer, injection detector, output validator, refusal helpers). Every module emits structured `guardrail.triggered`, `context.sanitized`, and `injection.detected` events so failures are observable and replayable.
-- **Workflow integration** – the `RunCoordinator` runs the input gate and injection detector before a workflow starts. Sanitization and detection wrap every retrieved chunk, and the output validator blocks unsafe responses before finalize. Guardrail violations raise `GuardrailViolation`, short-circuit the workflow, and surface via `workflow.failed` + `run.failed` with explicit reasons.
-- **Tool firewall** – `backend/app/executor.py` enforces per-run allowlists, argument schemas, rate limits, and side-effect classification before touching any MCP server. Violations emit both `tool.denied` and `guardrail.triggered` (`layer="tool"`, `threat_type="tool_abuse"`).
-- **Run state & UI signals** – `RunState` now persists `sanitized_chunk_ids` and guardrail metadata (status, reason, layer, threat type). The frontend consumes the new event types, shows guardrail-driven status banners, and renders a dedicated Safety panel listing sanitized context, guardrail interventions, injection detections, and tool denials in real time.
-- **Observability** – guardrail spans inherit the workflow/tool span structure and add `error_type="guardrail_failure"` attributes so the run inspector highlights when safety—not the model—stopped execution.
-
-The result: unsafe input is refused before planning, malicious context is neutralized, tools cannot be abused, output is validated structurally, and operators/users both see a calm, consistent explanation whenever guardrails intervene.
-
-Operational rollout guidance, feature flags, and monitoring expectations live in `docs/guardrail_rollout.md`.
+- Open the run inspector: `http://localhost:3000/runs/<run_id>/inspect`
+- Check for `workflow.waiting_for_event`, `workflow.waiting_for_approval`, tool spans, or guardrail events.
