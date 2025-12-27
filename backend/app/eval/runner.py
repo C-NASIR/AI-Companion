@@ -20,14 +20,16 @@ from ..api import (
     STATE_STORE,
     TRACE_STORE,
     WORKFLOW_STORE,
+    _get_legacy_container,
 )
 from ..events import Event
+from ..executor import ToolExecutor
 from ..ingestion import run_ingestion
+from ..mcp.bootstrap import initialize_mcp
 from ..state import RunState
 from ..workflow import WorkflowStore
 from ..workflow.models import WorkflowStatus
 from .dataset import EvalCase, EvaluationDataset, load_dataset
-from ..main import TOOL_EXECUTOR, _initialize_mcp
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +79,8 @@ class EvaluationRunner:
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
         self.cases_dir.mkdir(parents=True, exist_ok=True)
         self._runtime_ready = False
+        self._tool_executor: ToolExecutor | None = None
+        self._container = None
 
     async def run_all(self, case_ids: Sequence[str] | None = None) -> list[CaseRunResult]:
         """Run every dataset case (optionally filtered) sequentially."""
@@ -137,8 +141,22 @@ class EvaluationRunner:
     async def _prepare_runtime(self) -> None:
         if self._runtime_ready:
             return
-        await _initialize_mcp()
-        await TOOL_EXECUTOR.start()
+        self._container = _get_legacy_container()
+        await initialize_mcp(self._container)
+        if self._tool_executor is None:
+            self._tool_executor = ToolExecutor(
+                self._container.event_bus,
+                self._container.mcp_registry,
+                self._container.mcp_client,
+                self._container.permission_gate,
+                self._container.state_store,
+                self._container.tracer,
+                run_lease=self._container.run_lease,
+                tool_firewall_enabled=self._container.settings.guardrails.tool_firewall_enabled,
+                cache_store=self._container.cache_store,
+                tool_cache_enabled=self._container.settings.caching.tool_cache_enabled,
+            )
+        await self._tool_executor.start()
         await run_ingestion(
             RETRIEVAL_STORE,
             embedder=EMBEDDING_GENERATOR,
@@ -149,7 +167,8 @@ class EvaluationRunner:
     async def _shutdown_runtime(self) -> None:
         if not self._runtime_ready:
             return
-        await TOOL_EXECUTOR.shutdown()
+        if self._tool_executor:
+            await self._tool_executor.shutdown()
         self._runtime_ready = False
 
     async def _run_case(self, case: EvalCase) -> CaseRunResult:

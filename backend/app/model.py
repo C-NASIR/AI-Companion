@@ -199,6 +199,7 @@ async def fake_stream(
     metrics: ModelInvocationMetrics | None = None,
 ) -> AsyncGenerator[str, None]:
     """Local deterministic stream when OpenAI credentials are unavailable."""
+    model_router = get_model_router()
     snippet = (message.strip() or "…")[:60]
     context_snippet = (context.strip() if context else "none provided")[:80]
     if metrics:

@@ -10,10 +10,6 @@ reset_data_dir() {
   mkdir -p "${DATA_DIR}/events" "${DATA_DIR}/state"
 }
 
-cleanup() {
-  reset_data_dir || true
-}
-
 forward_signal() {
   local signal="$1"
   if [[ -n "${CHILD_PID}" ]]; then
@@ -21,12 +17,13 @@ forward_signal() {
   fi
 }
 
-trap cleanup EXIT
 trap 'forward_signal TERM' TERM
 trap 'forward_signal INT' INT
 
 python -m app.startup_checks
-reset_data_dir
+if [[ "${CLEAR_DATA_ON_STARTUP:-0}" == "1" ]]; then
+  reset_data_dir
+fi
 
 "$@" &
 CHILD_PID=$!
