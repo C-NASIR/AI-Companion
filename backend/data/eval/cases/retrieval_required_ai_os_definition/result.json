@@ -1,0 +1,34 @@
+{
+  "case": {
+    "id": "retrieval_required_ai_os_definition",
+    "description": "When user references AI OS definitions, system must retrieve evidence.",
+    "expectations": {
+      "outcome": "success",
+      "requires_retrieval": true,
+      "requires_tool": null,
+      "forbidden_tool": null,
+      "requires_citations": true,
+      "max_tool_calls": 0,
+      "verification_should_fail": false,
+      "guardrail_expected_layer": null,
+      "injection_signal_locations": [],
+      "expect_tool_denial": false,
+      "notes": "Variation reinforcing retrieval."
+    }
+  },
+  "result": {
+    "case_id": "retrieval_required_ai_os_definition",
+    "run_id": "eval-retrieval_required_ai_os_definition-a79f0bff",
+    "event_type": "run.completed",
+    "finished_ts": "2025-12-28T22:19:34.500236+00:00",
+    "duration_seconds": 1.5622086660005152,
+    "outcome": "success",
+    "verification_passed": true,
+    "verification_reason": null,
+    "final_text": "(fake:eval-retrieval_required_ai_os_definition-a79f0bff) Mode=answer. Grounded response using retrieved evidence. User message snippet: Define an AI operating system in the way our notes describe.. Context snippet: none provided. [futures_playbook.md::000] # Futures Playbook Preparing for the future is not an annual workshop\u2014it is a continuous discipline. Scenario planning p [ai_operating_systems.md::001] how intelligent behavior shows up in products. Without that scaffolding, clever prompts degrade into brittle demos. Mode [what_is_strategy.md::002] d translate them into concrete plays for product, go-to-market, and operations teams. Valuable strategies are falsifiabl Replace OPENAI_API_KEY to enable live streaming.",
+    "state_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/state/eval-retrieval_required_ai_os_definition-a79f0bff.json",
+    "events_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/events/eval-retrieval_required_ai_os_definition-a79f0bff.jsonl",
+    "trace_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/traces/eval-retrieval_required_ai_os_definition-a79f0bff.json",
+    "notes": "Variation reinforcing retrieval."
+  }
+}

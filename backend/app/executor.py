@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from collections import defaultdict
 from typing import Callable, Mapping
@@ -287,6 +288,34 @@ class ToolExecutor:
             )
             return
 
+        if descriptor.permission_scope == "github.read" and not self._has_github_credentials():
+            reason = "missing_github_token"
+            if self._tool_firewall_enabled:
+                await self._deny_for_guardrail(
+                    run_id,
+                    tool_name,
+                    descriptor.permission_scope,
+                    reason,
+                    identity=identity,
+                    log_extra=log_extra,
+                )
+            else:
+                await self._emit_denied(
+                    run_id,
+                    tool_name,
+                    descriptor.permission_scope,
+                    reason,
+                    identity=identity,
+                    log_extra=log_extra,
+                )
+            self._end_tool_span(
+                run_id,
+                span_id,
+                "failed",
+                {"error_type": "permission_denied", "reason": reason},
+            )
+            return
+
         cache_status = "disabled"
         cached_output: Mapping[str, object] | None = None
         cache_key: str | None = None
@@ -534,6 +563,14 @@ class ToolExecutor:
             user_role="human",
             run_type=run_type,
             is_evaluation=is_evaluation,
+        )
+
+    @staticmethod
+    def _has_github_credentials() -> bool:
+        return bool(
+            os.getenv("GITHUB_TOKEN")
+            or os.getenv("GITHUB_PAT")
+            or os.getenv("GITHUB_API_TOKEN")
         )
 
     @staticmethod

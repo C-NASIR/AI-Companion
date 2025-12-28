@@ -1,0 +1,34 @@
+{
+  "case": {
+    "id": "calculator_subtraction_keyword",
+    "description": "Subtraction phrased with keywords must also use the tool.",
+    "expectations": {
+      "outcome": "success",
+      "requires_retrieval": false,
+      "requires_tool": "calculator",
+      "forbidden_tool": null,
+      "requires_citations": false,
+      "max_tool_calls": 1,
+      "verification_should_fail": false,
+      "guardrail_expected_layer": null,
+      "injection_signal_locations": [],
+      "expect_tool_denial": false,
+      "notes": "Checks reverse operand parsing."
+    }
+  },
+  "result": {
+    "case_id": "calculator_subtraction_keyword",
+    "run_id": "eval-calculator_subtraction_keyword-85478c6d",
+    "event_type": "run.completed",
+    "finished_ts": "2025-12-28T22:19:27.783598+00:00",
+    "duration_seconds": 0.030875165946781635,
+    "outcome": "success",
+    "verification_passed": true,
+    "verification_reason": null,
+    "final_text": "The result is 45.",
+    "state_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/state/eval-calculator_subtraction_keyword-85478c6d.json",
+    "events_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/events/eval-calculator_subtraction_keyword-85478c6d.jsonl",
+    "trace_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/traces/eval-calculator_subtraction_keyword-85478c6d.json",
+    "notes": "Checks reverse operand parsing."
+  }
+}

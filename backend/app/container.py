@@ -299,7 +299,7 @@ def build_container(
 def wire_legacy_globals(container: BackendContainer) -> None:
     """Bridge for existing modules that rely on configure/get patterns."""
 
-    from .intelligence.utils import configure_state_store
+    from .run_logging import configure_state_store
     from .observability.api import configure_trace_api
     from .retrieval import configure_retrieval_store
 

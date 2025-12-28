@@ -1,0 +1,34 @@
+{
+  "case": {
+    "id": "futures_playbook_provenance",
+    "description": "Reinforce provenance and sources when making future bets.",
+    "expectations": {
+      "outcome": "success",
+      "requires_retrieval": true,
+      "requires_tool": null,
+      "forbidden_tool": null,
+      "requires_citations": true,
+      "max_tool_calls": 0,
+      "verification_should_fail": false,
+      "guardrail_expected_layer": null,
+      "injection_signal_locations": [],
+      "expect_tool_denial": false,
+      "notes": "Quote the \"Most importantly\" paragraph."
+    }
+  },
+  "result": {
+    "case_id": "futures_playbook_provenance",
+    "run_id": "eval-futures_playbook_provenance-f6644ff2",
+    "event_type": "run.completed",
+    "finished_ts": "2025-12-28T22:19:21.401782+00:00",
+    "duration_seconds": 1.5603329590521753,
+    "outcome": "success",
+    "verification_passed": true,
+    "verification_reason": null,
+    "final_text": "(fake:eval-futures_playbook_provenance-f6644ff2) Mode=answer. Grounded response using retrieved evidence. User message snippet: What rule does the Futures Playbook set about citing sources. Context snippet: none provided. [futures_playbook.md::001] y before reality forces a reaction. Effective playbooks mix qualitative signals with quantitative leading indicators. If [what_is_strategy.md::003] cts. Execution discipline completes the loop. A smart deck matters only if teams can inspect the logic, test hypotheses, [what_is_strategy.md::000] # What Is Strategy? Strategy predates management science. Ancient military texts such as Sun Tzu's *The Art of War* and  Replace OPENAI_API_KEY to enable live streaming.",
+    "state_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/state/eval-futures_playbook_provenance-f6644ff2.json",
+    "events_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/events/eval-futures_playbook_provenance-f6644ff2.jsonl",
+    "trace_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/traces/eval-futures_playbook_provenance-f6644ff2.json",
+    "notes": "Quote the \"Most importantly\" paragraph."
+  }
+}

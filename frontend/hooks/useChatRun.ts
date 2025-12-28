@@ -1022,17 +1022,15 @@ export const useChatRun = ({
     [cleanupSubscription, handleRunEvent]
   );
 
+
   useEffect(() => {
+    // Start the chat UI in a clean state.
+    // If a previous tab session stored an "active run", don't auto-resume it on app boot.
     const stored = readStoredRun();
-    if (!stored) return;
-    setCurrentRunId(stored.runId);
-    if (stored.submission) {
-      setLastSubmission(stored.submission);
+    if (stored) {
+      persistActiveRun(null);
     }
-    resetRunView();
-    setIsStreaming(true);
-    connectToRunEvents(stored.runId);
-  }, [connectToRunEvents, resetRunView]);
+  }, []);
 
   useEffect(() => {
     if (!runComplete || !currentRunId) {

@@ -1,0 +1,34 @@
+{
+  "case": {
+    "id": "retrieval_required_futures_context",
+    "description": "Connect uncertainty forces using retrieval; citations required.",
+    "expectations": {
+      "outcome": "success",
+      "requires_retrieval": true,
+      "requires_tool": null,
+      "forbidden_tool": null,
+      "requires_citations": true,
+      "max_tool_calls": 0,
+      "verification_should_fail": false,
+      "guardrail_expected_layer": null,
+      "injection_signal_locations": [],
+      "expect_tool_denial": false,
+      "notes": "Another retrieval-heavy case."
+    }
+  },
+  "result": {
+    "case_id": "retrieval_required_futures_context",
+    "run_id": "eval-retrieval_required_futures_context-794cde1b",
+    "event_type": "run.completed",
+    "finished_ts": "2025-12-28T22:19:36.054810+00:00",
+    "duration_seconds": 1.5553394160233438,
+    "outcome": "success",
+    "verification_passed": true,
+    "verification_reason": null,
+    "final_text": "(fake:eval-retrieval_required_futures_context-794cde1b) Mode=answer. Grounded response using retrieved evidence. User message snippet: Contrast certain forces with murky ones from the Futures Pla. Context snippet: none provided. [what_is_strategy.md::002] d translate them into concrete plays for product, go-to-market, and operations teams. Valuable strategies are falsifiabl [what_is_strategy.md::003] cts. Execution discipline completes the loop. A smart deck matters only if teams can inspect the logic, test hypotheses, [futures_playbook.md::001] y before reality forces a reaction. Effective playbooks mix qualitative signals with quantitative leading indicators. If Replace OPENAI_API_KEY to enable live streaming.",
+    "state_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/state/eval-retrieval_required_futures_context-794cde1b.json",
+    "events_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/events/eval-retrieval_required_futures_context-794cde1b.jsonl",
+    "trace_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/traces/eval-retrieval_required_futures_context-794cde1b.json",
+    "notes": "Another retrieval-heavy case."
+  }
+}

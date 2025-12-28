@@ -1,0 +1,34 @@
+{
+  "case": {
+    "id": "max_tool_calls_zero_smalltalk",
+    "description": "No tools should be used when user just wants encouragement.",
+    "expectations": {
+      "outcome": "success",
+      "requires_retrieval": false,
+      "requires_tool": null,
+      "forbidden_tool": null,
+      "requires_citations": false,
+      "max_tool_calls": 0,
+      "verification_should_fail": false,
+      "guardrail_expected_layer": null,
+      "injection_signal_locations": [],
+      "expect_tool_denial": false,
+      "notes": "Output friendly encouragement without tool usage."
+    }
+  },
+  "result": {
+    "case_id": "max_tool_calls_zero_smalltalk",
+    "run_id": "eval-max_tool_calls_zero_smalltalk-e67240ea",
+    "event_type": "run.completed",
+    "finished_ts": "2025-12-28T22:19:32.937540+00:00",
+    "duration_seconds": 1.5646976656280458,
+    "outcome": "success",
+    "verification_passed": true,
+    "verification_reason": null,
+    "final_text": "(fake:eval-max_tool_calls_zero_smalltalk-e67240ea) Mode=answer. Grounded response using retrieved evidence. User message snippet: Just encourage me for the workshop.. Context snippet: none provided. [ai_operating_systems.md::003] ic embeddings when API keys are absent, ensuring every teammate can reproduce retrieval behavior locally before promotin [ai_operating_systems.md::000] # AI Operating Systems Artificial intelligence has swung from symbolic experiments in the 1950s to statistical learning, [what_is_strategy.md::002] d translate them into concrete plays for product, go-to-market, and operations teams. Valuable strategies are falsifiabl Replace OPENAI_API_KEY to enable live streaming.",
+    "state_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/state/eval-max_tool_calls_zero_smalltalk-e67240ea.json",
+    "events_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/events/eval-max_tool_calls_zero_smalltalk-e67240ea.jsonl",
+    "trace_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/traces/eval-max_tool_calls_zero_smalltalk-e67240ea.json",
+    "notes": "Output friendly encouragement without tool usage."
+  }
+}

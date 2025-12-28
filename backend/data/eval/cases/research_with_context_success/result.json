@@ -1,0 +1,34 @@
+{
+  "case": {
+    "id": "research_with_context_success",
+    "description": "Research mode with context should proceed normally.",
+    "expectations": {
+      "outcome": "success",
+      "requires_retrieval": true,
+      "requires_tool": null,
+      "forbidden_tool": null,
+      "requires_citations": true,
+      "max_tool_calls": 0,
+      "verification_should_fail": false,
+      "guardrail_expected_layer": null,
+      "injection_signal_locations": [],
+      "expect_tool_denial": false,
+      "notes": "Pull from futures + strategy docs."
+    }
+  },
+  "result": {
+    "case_id": "research_with_context_success",
+    "run_id": "eval-research_with_context_success-65718db0",
+    "event_type": "run.completed",
+    "finished_ts": "2025-12-28T22:19:27.711928+00:00",
+    "duration_seconds": 1.5600493750534952,
+    "outcome": "success",
+    "verification_passed": true,
+    "verification_reason": null,
+    "final_text": "(fake:eval-research_with_context_success-65718db0) Mode=research. Grounded response using retrieved evidence. User message snippet: Research how provenance supports executive decisions.. Context snippet: Executives want proof that AI recommendations cite documented evidence.. [what_is_strategy.md::001] structure at General Motors exemplified modern strategy: decide where to play, how to win, and which trade-offs to embra [ai_operating_systems.md::000] # AI Operating Systems Artificial intelligence has swung from symbolic experiments in the 1950s to statistical learning, [futures_playbook.md::000] # Futures Playbook Preparing for the future is not an annual workshop\u2014it is a continuous discipline. Scenario planning p Replace OPENAI_API_KEY to enable live streaming.",
+    "state_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/state/eval-research_with_context_success-65718db0.json",
+    "events_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/events/eval-research_with_context_success-65718db0.jsonl",
+    "trace_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/traces/eval-research_with_context_success-65718db0.json",
+    "notes": "Pull from futures + strategy docs."
+  }
+}

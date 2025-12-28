@@ -1,4 +1,4 @@
-"""Run state and decision tracking models for the intelligence layer."""
+"""Run state and decision tracking models for the workflow runtime."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ class PlanType(str, Enum):
 
 
 class RunPhase(str, Enum):
-    """Named phases for the fixed intelligence control graph."""
+    """Named phases for the run control flow."""
 
     INIT = "init"
     RECEIVE = "receive"
@@ -87,7 +87,7 @@ class ToolResultRecord(BaseModel):
 
 
 class RunState(BaseModel):
-    """Mutable run state that flows through each intelligence node."""
+    """Mutable run state that flows through each workflow step."""
 
     model_config = ConfigDict(extra="forbid")
 

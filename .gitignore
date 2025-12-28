@@ -5,7 +5,7 @@
 !.env.example
 
 # Documentation (not tracked per instructions)
-/docs
+/building_docs
 
 # Python
 __pycache__/

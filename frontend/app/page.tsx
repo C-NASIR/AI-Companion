@@ -19,8 +19,7 @@ export default function HomePage() {
   const [mode, setMode] = useState<ChatMode>("answer");
   const defaultTenant =
     process.env.NEXT_PUBLIC_TENANT_ID?.trim() || "tenant-demo";
-  const defaultUser =
-    process.env.NEXT_PUBLIC_USER_ID?.trim() || "user-demo";
+  const defaultUser = process.env.NEXT_PUBLIC_USER_ID?.trim() || "user-demo";
   const [tenantId, setTenantId] = useState(defaultTenant);
   const [userId, setUserId] = useState(defaultUser);
 
@@ -47,6 +46,7 @@ export default function HomePage() {
   }, [userId]);
 
   const chatRun = useChatRun({ message, context, mode, tenantId, userId });
+  console.log("chat run ", chatRun);
   const feedback = useFeedback({
     runComplete: chatRun.runComplete,
     currentRunId: chatRun.currentRunId,

@@ -1,0 +1,34 @@
+{
+  "case": {
+    "id": "strategy_refusal_focus",
+    "description": "Connect strategy to the idea of deliberate refusal across horizons.",
+    "expectations": {
+      "outcome": "success",
+      "requires_retrieval": true,
+      "requires_tool": null,
+      "forbidden_tool": null,
+      "requires_citations": true,
+      "max_tool_calls": 0,
+      "verification_should_fail": false,
+      "guardrail_expected_layer": null,
+      "injection_signal_locations": [],
+      "expect_tool_denial": false,
+      "notes": "Reinforce that valuable strategy encodes deliberate refusal, citing evidence."
+    }
+  },
+  "result": {
+    "case_id": "strategy_refusal_focus",
+    "run_id": "eval-strategy_refusal_focus-eb908172",
+    "event_type": "run.completed",
+    "finished_ts": "2025-12-28T22:19:08.908452+00:00",
+    "duration_seconds": 1.563114957883954,
+    "outcome": "success",
+    "verification_passed": true,
+    "verification_reason": null,
+    "final_text": "(fake:eval-strategy_refusal_focus-eb908172) Mode=answer. Grounded response using retrieved evidence. User message snippet: How do strategists decide what NOT to do according to the st. Context snippet: none provided. [futures_playbook.md::001] y before reality forces a reaction. Effective playbooks mix qualitative signals with quantitative leading indicators. If [what_is_strategy.md::001] structure at General Motors exemplified modern strategy: decide where to play, how to win, and which trade-offs to embra [what_is_strategy.md::003] cts. Execution discipline completes the loop. A smart deck matters only if teams can inspect the logic, test hypotheses, Replace OPENAI_API_KEY to enable live streaming.",
+    "state_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/state/eval-strategy_refusal_focus-eb908172.json",
+    "events_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/events/eval-strategy_refusal_focus-eb908172.jsonl",
+    "trace_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/traces/eval-strategy_refusal_focus-eb908172.json",
+    "notes": "Reinforce that valuable strategy encodes deliberate refusal, citing evidence."
+  }
+}

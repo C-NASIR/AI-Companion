@@ -19,12 +19,13 @@ from ..retrieval import RetrievedChunk
 from ..limits.budget import BudgetExceeded
 from ..schemas import ChatMode
 from ..state import PlanType, RunPhase, RunState
-from ..intelligence.intents import match_tool_intent
-from ..intelligence.tool_feedback import (
+from ..planning import choose_plan
+from ..tool_intents import match_tool_intent
+from ..tool_feedback import (
     build_tool_failure_text,
     build_tool_summary_text,
 )
-from ..intelligence.utils import log_run
+from ..run_logging import log_run
 from .context import ActivityContext
 from .exceptions import ExternalEventRequired, HumanApprovalRequired
 from .models import ActivityFunc, WorkflowState, WorkflowStatus
@@ -122,13 +123,11 @@ def create_receive_activity(ctx: ActivityContext) -> ActivityFunc:
 
 
 def create_plan_activity(ctx: ActivityContext) -> ActivityFunc:
-    from ..intelligence.nodes.planner import _choose_plan  # reuse planner heuristics
-
     async def _activity(state: RunState, workflow_state: WorkflowState):
         async with ctx.step_scope(state, "plan", RunPhase.PLAN):
             identity = ctx._identity(state)
             await ctx.emit_status(state, "thinking")
-            plan_type, reason = _choose_plan(state)
+            plan_type, reason = choose_plan(state)
             state.set_plan_type(plan_type)
             state.record_decision("plan_type", plan_type.value, notes=reason)
             await ctx.emit_decision(state, "plan_type", plan_type.value, reason)
@@ -202,6 +201,21 @@ def create_retrieve_activity(ctx: ActivityContext) -> ActivityFunc:
     async def _activity(state: RunState, workflow_state: WorkflowState):
         async with ctx.step_scope(state, "retrieve", RunPhase.RETRIEVE):
             identity = ctx._identity(state)
+            plan = state.plan_type or PlanType.DIRECT_ANSWER
+            if plan in {PlanType.NEEDS_CLARIFICATION, PlanType.CANNOT_ANSWER}:
+                state.set_retrieved_chunks([])
+                decision_value = "0"
+                notes = "skipped_due_to_plan"
+                state.record_decision("retrieval_chunks", decision_value, notes=notes)
+                await ctx.emit_decision(state, "retrieval_chunks", decision_value, notes)
+                return state, workflow_state
+            if state.requested_tool and state.last_tool_status in {"completed", "failed", "denied"}:
+                state.set_retrieved_chunks([])
+                decision_value = "0"
+                notes = "skipped_due_to_tool"
+                state.record_decision("retrieval_chunks", decision_value, notes=notes)
+                await ctx.emit_decision(state, "retrieval_chunks", decision_value, notes)
+                return state, workflow_state
             if state.last_tool_status == "requested":
                 raise ExternalEventRequired(
                     ("tool.completed", "tool.failed", "tool.denied"),
@@ -408,6 +422,10 @@ def _evaluate_grounding_requirements(state: RunState) -> tuple[bool, str | None]
 
 
 def _evaluate_general_verification(state: RunState) -> tuple[bool, str | None]:
+    if state.plan_type == PlanType.NEEDS_CLARIFICATION:
+        return False, "needs_clarification"
+    if state.plan_type == PlanType.CANNOT_ANSWER:
+        return False, "refusal"
     if state.last_tool_status == "completed":
         return True, None
     if state.last_tool_status == "failed":
@@ -425,6 +443,13 @@ def _evaluate_general_verification(state: RunState) -> tuple[bool, str | None]:
 def create_verify_activity(ctx: ActivityContext) -> ActivityFunc:
     async def _activity(state: RunState, workflow_state: WorkflowState):
         async with ctx.step_scope(state, "verify", RunPhase.VERIFY):
+            if state.plan_type in {PlanType.NEEDS_CLARIFICATION, PlanType.CANNOT_ANSWER}:
+                state.record_decision("grounding", "skipped", notes="not_applicable")
+                await ctx.emit_decision(state, "grounding", "skipped", "not_applicable")
+                state.record_decision("verification", "skipped", notes="not_applicable")
+                await ctx.emit_decision(state, "verification", "skipped", "not_applicable")
+                log_run(state.run_id, "verification skipped")
+                return state, workflow_state
             if state.last_tool_status == "completed" and not state.output_text.strip():
                 summary = build_tool_summary_text(state)
                 if summary:
@@ -463,6 +488,10 @@ def _approval_required(state: RunState) -> bool:
 def create_maybe_approve_activity(ctx: ActivityContext) -> ActivityFunc:
     async def _activity(state: RunState, workflow_state: WorkflowState):
         async with ctx.step_scope(state, "maybe_approve", RunPhase.APPROVAL):
+            if state.is_evaluation and _approval_required(state) and not workflow_state.human_decision:
+                state.record_decision("human_approval", "skipped", notes="evaluation_auto_skip")
+                await ctx.emit_decision(state, "human_approval", "skipped", "evaluation_auto_skip")
+                return state, workflow_state
             if not _approval_required(state):
                 state.record_decision("human_approval", "skipped", notes="not_required")
                 await ctx.emit_decision(state, "human_approval", "skipped", "not_required")
@@ -484,10 +513,16 @@ def create_finalize_activity(ctx: ActivityContext) -> ActivityFunc:
     async def _activity(state: RunState, workflow_state: WorkflowState):
         async with ctx.step_scope(state, "finalize", RunPhase.FINALIZE):
             await ctx.ensure_output_safe(state)
-            passed = bool(state.verification_passed)
-            outcome = "success" if passed else "failed"
-            reason = state.verification_reason if not passed else None
-            if not passed and state.last_tool_status == "failed":
+            verification_passed = state.verification_passed
+            if verification_passed is True:
+                outcome = "success"
+            elif state.plan_type == PlanType.CANNOT_ANSWER:
+                outcome = "refusal"
+            else:
+                outcome = "failure"
+            terminal_success = outcome == "success"
+            reason = state.verification_reason if not terminal_success else None
+            if not terminal_success and state.last_tool_status == "failed":
                 failure_text = build_tool_failure_text(state)
                 if failure_text and not state.output_text.strip():
                     state.append_output(failure_text)
@@ -499,12 +534,12 @@ def create_finalize_activity(ctx: ActivityContext) -> ActivityFunc:
             payload: dict[str, object] = {"final_text": state.output_text}
             if reason:
                 payload["reason"] = reason
-            event_type = "run.completed" if passed else "run.failed"
+            event_type = "run.completed" if terminal_success else "run.failed"
             await ctx.emit_event(state, event_type, payload)
             await ctx.emit_status(state, "complete")
             log_run(state.run_id, "finalize outcome=%s", outcome)
             workflow_state.status = (
-                WorkflowStatus.COMPLETED if passed else WorkflowStatus.FAILED
+                WorkflowStatus.COMPLETED if terminal_success else WorkflowStatus.FAILED
             )
         return state, workflow_state
 

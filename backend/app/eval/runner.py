@@ -1,4 +1,4 @@
-"""Deterministic evaluation runner that replays the full intelligence stack."""
+"""Deterministic evaluation runner that replays the full workflow stack."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from ..api import (
     WORKFLOW_STORE,
     _get_legacy_container,
 )
-from ..events import Event
+from ..events import Event, new_event
 from ..executor import ToolExecutor
 from ..ingestion import run_ingestion
 from ..mcp.bootstrap import initialize_mcp
@@ -184,45 +184,65 @@ class EvaluationRunner:
         )
         completion_event = asyncio.Event()
         terminal_event: dict[str, Event] = {}
+        terminal_types = {"run.completed", "run.failed", "workflow.waiting_for_approval"}
 
         async def _listener(event: Event) -> None:
-            if event.type in {"run.completed", "run.failed"}:
+            if event.type in terminal_types:
                 terminal_event["value"] = event
                 completion_event.set()
 
         unsubscribe = EVENT_BUS.subscribe(run_id, _listener)
         start_time = time.perf_counter()
+        timed_out = False
         try:
             await RUN_COORDINATOR.start_run(state)
             await asyncio.wait_for(completion_event.wait(), timeout=self.timeout_seconds)
-        except asyncio.TimeoutError as exc:
+        except asyncio.TimeoutError:
+            timed_out = True
             logger.error("evaluation case timed out case=%s run_id=%s", case.id, run_id)
-            raise RuntimeError(f"run {run_id} timed out") from exc
         finally:
             unsubscribe()
         duration = time.perf_counter() - start_time
+
         finished_event = terminal_event.get("value")
         if not finished_event:
-            raise RuntimeError(f"run {run_id} finished without terminal event")
+            event_type = "evaluation.timeout" if timed_out else "evaluation.missing_terminal_event"
+            finished_event = new_event(event_type, run_id, {"case_id": case.id})
+
         final_state = STATE_STORE.load(run_id)
         if not final_state:
-            raise RuntimeError(f"run {run_id} missing persisted state")
+            logger.error("run %s missing persisted state", run_id)
+            outcome = None
+            verification_passed = None
+            verification_reason = None
+            final_text = ""
+        else:
+            outcome = final_state.outcome
+            verification_passed = final_state.verification_passed
+            verification_reason = final_state.verification_reason
+            final_text = final_state.output_text
+
         workflow_state = self.workflow_store.load(run_id) if self.workflow_store else None
         self._assert_workflow_terminated(workflow_state, run_id)
+        notes = case.expectations.notes
+        if finished_event.type == "workflow.waiting_for_approval":
+            notes = f"{notes} | blocked=waiting_for_approval"
+        elif timed_out:
+            notes = f"{notes} | blocked=timeout"
         result = CaseRunResult(
             case_id=case.id,
             run_id=run_id,
             event_type=finished_event.type,
             finished_ts=finished_event.ts,
             duration_seconds=duration,
-            outcome=final_state.outcome,
-            verification_passed=final_state.verification_passed,
-            verification_reason=final_state.verification_reason,
-            final_text=final_state.output_text,
+            outcome=outcome,
+            verification_passed=verification_passed,
+            verification_reason=verification_reason,
+            final_text=final_text,
             state_path=str(self._state_path(run_id)),
             events_path=str(self._events_path(run_id)),
             trace_path=str(self._trace_path(run_id)),
-            notes=case.expectations.notes,
+            notes=notes,
         )
         logger.info(
             "evaluation case completed case=%s run_id=%s outcome=%s",

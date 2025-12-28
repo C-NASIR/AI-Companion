@@ -1,0 +1,34 @@
+{
+  "case": {
+    "id": "strategy_tradeoffs_emphasis",
+    "description": "Highlight why strategy is about trade-offs and refusing distractions.",
+    "expectations": {
+      "outcome": "success",
+      "requires_retrieval": true,
+      "requires_tool": null,
+      "forbidden_tool": null,
+      "requires_citations": true,
+      "max_tool_calls": 0,
+      "verification_should_fail": false,
+      "guardrail_expected_layer": null,
+      "injection_signal_locations": [],
+      "expect_tool_denial": false,
+      "notes": "Pull from Sloan / trade-off discussion without using tools."
+    }
+  },
+  "result": {
+    "case_id": "strategy_tradeoffs_emphasis",
+    "run_id": "eval-strategy_tradeoffs_emphasis-80fe0898",
+    "event_type": "run.completed",
+    "finished_ts": "2025-12-28T22:19:05.777439+00:00",
+    "duration_seconds": 1.564537082798779,
+    "outcome": "success",
+    "verification_passed": true,
+    "verification_reason": null,
+    "final_text": "(fake:eval-strategy_tradeoffs_emphasis-80fe0898) Mode=answer. Grounded response using retrieved evidence. User message snippet: Explain why effective strategy is often about refusing tempt. Context snippet: none provided. [futures_playbook.md::001] y before reality forces a reaction. Effective playbooks mix qualitative signals with quantitative leading indicators. If [ai_operating_systems.md::000] # AI Operating Systems Artificial intelligence has swung from symbolic experiments in the 1950s to statistical learning, [ai_operating_systems.md::002] logs chunk identifiers, metadata, and similarity scores, reviewers can inspect whether an answer truly relied on trustwo Replace OPENAI_API_KEY to enable live streaming.",
+    "state_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/state/eval-strategy_tradeoffs_emphasis-80fe0898.json",
+    "events_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/events/eval-strategy_tradeoffs_emphasis-80fe0898.jsonl",
+    "trace_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/traces/eval-strategy_tradeoffs_emphasis-80fe0898.json",
+    "notes": "Pull from Sloan / trade-off discussion without using tools."
+  }
+}

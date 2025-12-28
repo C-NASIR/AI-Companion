@@ -1,0 +1,34 @@
+{
+  "case": {
+    "id": "futures_playbook_measurements",
+    "description": "Use context to discuss telemetry and adoption metrics.",
+    "expectations": {
+      "outcome": "success",
+      "requires_retrieval": true,
+      "requires_tool": null,
+      "forbidden_tool": null,
+      "requires_citations": true,
+      "max_tool_calls": 0,
+      "verification_should_fail": false,
+      "guardrail_expected_layer": null,
+      "injection_signal_locations": [],
+      "expect_tool_denial": false,
+      "notes": "Reference telemetry guidance from the playbook."
+    }
+  },
+  "result": {
+    "case_id": "futures_playbook_measurements",
+    "run_id": "eval-futures_playbook_measurements-3ab94cd1",
+    "event_type": "run.completed",
+    "finished_ts": "2025-12-28T22:19:22.955311+00:00",
+    "duration_seconds": 1.5517405830323696,
+    "outcome": "success",
+    "verification_passed": true,
+    "verification_reason": null,
+    "final_text": "(fake:eval-futures_playbook_measurements-3ab94cd1) Mode=research. Grounded response using retrieved evidence. User message snippet: How should teams measure adoption of AI-native collaboration. Context snippet: none provided. [futures_playbook.md::000] # Futures Playbook Preparing for the future is not an annual workshop\u2014it is a continuous discipline. Scenario planning p [what_is_strategy.md::000] # What Is Strategy? Strategy predates management science. Ancient military texts such as Sun Tzu's *The Art of War* and  [what_is_strategy.md::002] d translate them into concrete plays for product, go-to-market, and operations teams. Valuable strategies are falsifiabl Replace OPENAI_API_KEY to enable live streaming.",
+    "state_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/state/eval-futures_playbook_measurements-3ab94cd1.json",
+    "events_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/events/eval-futures_playbook_measurements-3ab94cd1.jsonl",
+    "trace_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/traces/eval-futures_playbook_measurements-3ab94cd1.json",
+    "notes": "Reference telemetry guidance from the playbook."
+  }
+}

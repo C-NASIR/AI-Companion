@@ -50,7 +50,12 @@ def create_app() -> FastAPI:
 
     settings = get_settings()
 
-    container = build_container(settings=settings)
+    # In distributed mode, the API process should stay stateless-ish: it publishes
+    # run requests and serves SSE/state, while the workflow worker drives execution.
+    container = build_container(
+        settings=settings,
+        start_workflow_on_run_start=settings.runtime.mode != "distributed",
+    )
     wire_legacy_globals(container)
 
     tool_executor = ToolExecutor(
@@ -82,24 +87,25 @@ def create_app() -> FastAPI:
         run_startup_checks()
         startup_container(
             container,
-            start_coordinator=settings.runtime.mode == "single_process",
+            start_coordinator=settings.runtime.mode != "distributed",
             start_guardrail_monitor=settings.runtime.mode == "single_process",
         )
-        await initialize_mcp(container)
+
         if settings.runtime.mode == "single_process":
+            await initialize_mcp(container)
             await tool_executor.start()
-        stats = await run_ingestion(
-            container.retrieval_store,
-            embedder=container.embedding_generator,
-            event_bus=container.event_bus,
-        )
-        logger = logging.getLogger(__name__)
-        logger.info(
-            "knowledge ingestion ready documents=%s chunks=%s",
-            stats.get("documents_ingested"),
-            stats.get("chunks_indexed"),
-            extra={"run_id": "system"},
-        )
+            stats = await run_ingestion(
+                container.retrieval_store,
+                embedder=container.embedding_generator,
+                event_bus=container.event_bus,
+            )
+            logger = logging.getLogger(__name__)
+            logger.info(
+                "knowledge ingestion ready documents=%s chunks=%s",
+                stats.get("documents_ingested"),
+                stats.get("chunks_indexed"),
+                extra={"run_id": "system"},
+            )
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:

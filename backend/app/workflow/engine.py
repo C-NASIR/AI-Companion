@@ -286,6 +286,9 @@ class WorkflowEngine:
                         signal.event.type,
                         extra={"run_id": run_id},
                     )
+                    refreshed_state = self.state_store.load(run_id)
+                    if refreshed_state is not None:
+                        runtime.run_state = refreshed_state
                 await self._process_until_blocked(runtime)
         except Exception:  # pragma: no cover - defensive guard
             logger.exception(
@@ -446,6 +449,25 @@ class WorkflowEngine:
                         "reason": exc.reason,
                     },
                 )
+
+                # If the awaited external event already arrived (common race in
+                # distributed mode: tool completes while the step is entering a
+                # waiting state), refresh state and resume immediately.
+                refreshed_state = self.state_store.load(runtime.run_state.run_id)
+                if refreshed_state is not None:
+                    runtime.run_state = refreshed_state
+                    if (
+                        "tool.completed" in exc.event_types
+                        or "tool.failed" in exc.event_types
+                        or "tool.denied" in exc.event_types
+                    ) and refreshed_state.last_tool_status in {
+                        "completed",
+                        "failed",
+                        "denied",
+                    }:
+                        runtime.workflow_state.clear_pending_events()
+                        self.workflow_store.save(runtime.workflow_state)
+                        await runtime.queue.put(WorkflowSignal(reason="resume"))
                 return
             except Exception as exc:
                 should_continue, error_payload = await self._handle_activity_failure(

@@ -22,5 +22,4 @@ def apply_refusal(state: RunState, reason: str | None = None) -> str:
     state.output_text = message
     refusal_reason = reason or "guardrail_refused"
     state.record_decision("guardrail_refusal", "triggered", notes=refusal_reason)
-    state.set_verification(passed=False, reason=refusal_reason)
     return message

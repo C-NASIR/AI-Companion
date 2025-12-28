@@ -128,6 +128,9 @@ class InputGate:
             "launch a ddos",
             "write malware",
             "ransomware",
+            "illegal market manipulation",
+            "evading audit trails",
+            "forbidden instructions",
         ]
         for phrase in disallowed:
             if phrase in text:

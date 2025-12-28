@@ -227,6 +227,7 @@ class RunCoordinator:
             threat_type=violation.assessment.threat_type.value,
         )
         apply_refusal(state, reason=reason)
+        state.set_outcome("refusal", reason)
         self.state_store.save(state)
         await self.bus.publish(
             new_event(

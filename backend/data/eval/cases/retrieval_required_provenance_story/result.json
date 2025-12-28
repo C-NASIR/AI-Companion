@@ -1,0 +1,34 @@
+{
+  "case": {
+    "id": "retrieval_required_provenance_story",
+    "description": "Provide a short narrative combining AI OS provenance ideas.",
+    "expectations": {
+      "outcome": "success",
+      "requires_retrieval": true,
+      "requires_tool": null,
+      "forbidden_tool": null,
+      "requires_citations": true,
+      "max_tool_calls": 0,
+      "verification_should_fail": false,
+      "guardrail_expected_layer": null,
+      "injection_signal_locations": [],
+      "expect_tool_denial": false,
+      "notes": "Ensures creative but grounded responses."
+    }
+  },
+  "result": {
+    "case_id": "retrieval_required_provenance_story",
+    "run_id": "eval-retrieval_required_provenance_story-45e96aa3",
+    "event_type": "run.completed",
+    "finished_ts": "2025-12-28T22:19:39.178026+00:00",
+    "duration_seconds": 1.5601164158433676,
+    "outcome": "success",
+    "verification_passed": true,
+    "verification_reason": null,
+    "final_text": "(fake:eval-retrieval_required_provenance_story-45e96aa3) Mode=summarize. Grounded response using retrieved evidence. User message snippet: Tell a short story about provenance-aware AI companions.. Context snippet: none provided. [ai_operating_systems.md::003] ic embeddings when API keys are absent, ensuring every teammate can reproduce retrieval behavior locally before promotin [ai_operating_systems.md::002] logs chunk identifiers, metadata, and similarity scores, reviewers can inspect whether an answer truly relied on trustwo [what_is_strategy.md::000] # What Is Strategy? Strategy predates management science. Ancient military texts such as Sun Tzu's *The Art of War* and  Replace OPENAI_API_KEY to enable live streaming.",
+    "state_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/state/eval-retrieval_required_provenance_story-45e96aa3.json",
+    "events_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/events/eval-retrieval_required_provenance_story-45e96aa3.jsonl",
+    "trace_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/traces/eval-retrieval_required_provenance_story-45e96aa3.json",
+    "notes": "Ensures creative but grounded responses."
+  }
+}

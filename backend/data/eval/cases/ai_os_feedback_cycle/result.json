@@ -1,0 +1,34 @@
+{
+  "case": {
+    "id": "ai_os_feedback_cycle",
+    "description": "Explain how continual learning closes the loop.",
+    "expectations": {
+      "outcome": "success",
+      "requires_retrieval": true,
+      "requires_tool": null,
+      "forbidden_tool": null,
+      "requires_citations": true,
+      "max_tool_calls": 0,
+      "verification_should_fail": false,
+      "guardrail_expected_layer": null,
+      "injection_signal_locations": [],
+      "expect_tool_denial": false,
+      "notes": "Mention ingestion, feedback, and retraining hooks from the AI OS doc."
+    }
+  },
+  "result": {
+    "case_id": "ai_os_feedback_cycle",
+    "run_id": "eval-ai_os_feedback_cycle-f90ce134",
+    "event_type": "run.completed",
+    "finished_ts": "2025-12-28T22:19:13.589964+00:00",
+    "duration_seconds": 1.5627867081202567,
+    "outcome": "success",
+    "verification_passed": true,
+    "verification_reason": null,
+    "final_text": "(fake:eval-ai_os_feedback_cycle-f90ce134) Mode=answer. Grounded response using retrieved evidence. User message snippet: Describe the continual learning loop mentioned in the AI OS . Context snippet: none provided. [futures_playbook.md::001] y before reality forces a reaction. Effective playbooks mix qualitative signals with quantitative leading indicators. If [what_is_strategy.md::000] # What Is Strategy? Strategy predates management science. Ancient military texts such as Sun Tzu's *The Art of War* and  [ai_operating_systems.md::000] # AI Operating Systems Artificial intelligence has swung from symbolic experiments in the 1950s to statistical learning, Replace OPENAI_API_KEY to enable live streaming.",
+    "state_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/state/eval-ai_os_feedback_cycle-f90ce134.json",
+    "events_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/events/eval-ai_os_feedback_cycle-f90ce134.jsonl",
+    "trace_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/traces/eval-ai_os_feedback_cycle-f90ce134.json",
+    "notes": "Mention ingestion, feedback, and retraining hooks from the AI OS doc."
+  }
+}

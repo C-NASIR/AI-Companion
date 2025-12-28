@@ -20,6 +20,7 @@ from ..container import (
     startup as startup_container,
 )
 from ..env import load_dotenv_if_present
+from ..ingestion import run_ingestion
 from ..mcp.bootstrap import initialize_mcp
 from ..settings import get_settings
 
@@ -33,9 +34,23 @@ async def run_workflow_worker() -> None:
         raise RuntimeError("workflow worker requires BACKEND_MODE=distributed")
 
     container = build_container(settings=settings, start_workflow_on_run_start=True)
-    startup_container(container, start_coordinator=True, start_guardrail_monitor=False)
+    # Prepare stores + event bus, but delay subscriptions until after ingestion is ready.
+    startup_container(container, start_coordinator=False, start_guardrail_monitor=False)
     await initialize_mcp(container)
 
+    stats = await run_ingestion(
+        container.retrieval_store,
+        embedder=container.embedding_generator,
+        event_bus=container.event_bus,
+    )
+    logger.info(
+        "knowledge ingestion ready documents=%s chunks=%s",
+        stats.get("documents_ingested"),
+        stats.get("chunks_indexed"),
+        extra={"run_id": "system"},
+    )
+
+    container.run_coordinator.start()
     logger.info("workflow worker started", extra={"run_id": "system"})
     try:
         # All work happens via EventBus subscriptions; keep process alive.

@@ -1,0 +1,34 @@
+{
+  "case": {
+    "id": "calculator_divide_by_zero_failure",
+    "description": "Tool should fail on invalid input and verification should notice.",
+    "expectations": {
+      "outcome": "failure",
+      "requires_retrieval": false,
+      "requires_tool": "calculator",
+      "forbidden_tool": null,
+      "requires_citations": false,
+      "max_tool_calls": 1,
+      "verification_should_fail": true,
+      "guardrail_expected_layer": null,
+      "injection_signal_locations": [],
+      "expect_tool_denial": false,
+      "notes": "Run must fail with tool_failed due to division_by_zero."
+    }
+  },
+  "result": {
+    "case_id": "calculator_divide_by_zero_failure",
+    "run_id": "eval-calculator_divide_by_zero_failure-de36f9f6",
+    "event_type": "run.failed",
+    "finished_ts": "2025-12-28T22:19:28.501039+00:00",
+    "duration_seconds": 0.6574662500061095,
+    "outcome": "failure",
+    "verification_passed": false,
+    "verification_reason": "tool_failed",
+    "final_text": "(fake:eval-calculator_divide_by_zero_failure-de36f9f6) Mode=answer. No evidence chunks were retrieved. I lack sufficient evidence to answer. Replace OPENAI_API_KEY to enable live streaming.",
+    "state_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/state/eval-calculator_divide_by_zero_failure-de36f9f6.json",
+    "events_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/events/eval-calculator_divide_by_zero_failure-de36f9f6.jsonl",
+    "trace_path": "/Users/cnasir/learn/ai_engineering/ai_companion/backend/data/traces/eval-calculator_divide_by_zero_failure-de36f9f6.json",
+    "notes": "Run must fail with tool_failed due to division_by_zero."
+  }
+}
