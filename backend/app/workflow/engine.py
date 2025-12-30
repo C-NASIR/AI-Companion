@@ -183,11 +183,6 @@ class WorkflowEngine:
             decision,
             extra={"run_id": run_id},
         )
-        await self._emit_workflow_event(
-            run_id,
-            "workflow.approval.recorded",
-            {"decision": decision},
-        )
         await runtime.queue.put(WorkflowSignal(reason="resume"))
 
     async def _apply_human_decision(
@@ -496,7 +491,24 @@ class WorkflowEngine:
                 runtime.workflow_state.advance_to(next_step)
                 self.workflow_store.save(runtime.workflow_state)
                 continue
-            runtime.workflow_state.mark_completed()
+
+            terminal_status = runtime.workflow_state.status
+            if terminal_status == WorkflowStatus.FAILED:
+                self.workflow_store.save(runtime.workflow_state)
+                await self._emit_workflow_event(
+                    runtime.run_state.run_id,
+                    "workflow.failed",
+                    {"step": current_step},
+                )
+                logger.info(
+                    "workflow failed",
+                    extra={"run_id": runtime.run_state.run_id},
+                )
+                self._finish_trace(runtime, "failed")
+                return
+
+            if terminal_status != WorkflowStatus.COMPLETED:
+                runtime.workflow_state.mark_completed()
             self.workflow_store.save(runtime.workflow_state)
             await self._emit_workflow_event(
                 runtime.run_state.run_id,

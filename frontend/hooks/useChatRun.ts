@@ -182,20 +182,13 @@ const buildSpanAlerts = (spans: SpanRecord[]): SpanAlert[] => {
   const alerts: SpanAlert[] = [];
   const approvalSpan = findLatestSpan(
     spans,
-    (span) =>
-      span.status === "waiting" &&
-      (span.attributes?.["error_type"] === "approval_wait" ||
-        span.name.includes("approve"))
+    (span) => !span.end_time && span.name === "workflow.wait.human_approval"
   );
   if (approvalSpan) {
-    const reason =
-      (approvalSpan.attributes?.["reason"] as string) ??
-      (approvalSpan.error?.reason as string) ??
-      "Waiting for approval";
     alerts.push({
       type: "approval",
       title: "Waiting for approval",
-      message: reason,
+      message: "Workflow is paused until you approve or reject.",
     });
   }
 
@@ -214,8 +207,7 @@ const buildSpanAlerts = (spans: SpanRecord[]): SpanAlert[] => {
   const toolSpan = findLatestSpan(
     spans,
     (span) =>
-      span.kind === "tool" &&
-      (!span.end_time || span.status === "running" || span.status === "waiting")
+      span.kind === "tool" && !span.end_time
   );
   if (toolSpan) {
     const toolName =
@@ -233,7 +225,7 @@ const buildSpanAlerts = (spans: SpanRecord[]): SpanAlert[] => {
     (span) =>
       span.kind === "intelligence" &&
       span.name.includes("retrieve") &&
-      span.status === "waiting"
+      !span.end_time
   );
   if (retrievalSpan) {
     alerts.push({
@@ -320,6 +312,7 @@ export const useChatRun = ({
 
   const subscriptionRef = useRef<RunEventSubscription | null>(null);
   const lastSeqRef = useRef(0);
+  const seenEventIdsRef = useRef<Set<string>>(new Set());
   const outputRef = useRef("");
 
   const statusDisplay: StatusDisplay = useMemo(() => {
@@ -496,6 +489,7 @@ export const useChatRun = ({
     setDegradedReason(null);
     setBudgetStatus("ok");
     lastSeqRef.current = 0;
+    seenEventIdsRef.current = new Set();
   }, []);
 
   useEffect(() => {
@@ -529,10 +523,11 @@ export const useChatRun = ({
   }, [currentRunId, runComplete]);
 
   const handleRunEvent = useCallback((event: RunEvent) => {
-    if (event.seq <= lastSeqRef.current) {
+    if (seenEventIdsRef.current.has(event.id)) {
       return;
     }
-    lastSeqRef.current = event.seq;
+    seenEventIdsRef.current.add(event.id);
+    lastSeqRef.current = Math.max(lastSeqRef.current, event.seq);
 
     switch (event.type) {
       case "guardrail.triggered": {
@@ -1017,6 +1012,7 @@ export const useChatRun = ({
     (runId: string) => {
       cleanupSubscription();
       lastSeqRef.current = 0;
+      seenEventIdsRef.current = new Set();
       subscriptionRef.current = subscribeToRunEvents(runId, handleRunEvent);
     },
     [cleanupSubscription, handleRunEvent]
