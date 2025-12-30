@@ -316,6 +316,14 @@ export const useChatRun = ({
   const outputRef = useRef("");
 
   const statusDisplay: StatusDisplay = useMemo(() => {
+    if (runOutcome === "failed") {
+      return {
+        label: "Workflow failed",
+        hint:
+          runOutcomeReason ??
+          "The workflow exhausted its retries or hit an unrecoverable error.",
+      };
+    }
     if (budgetStatus === "exhausted") {
       return {
         label: "Budget exhausted",
@@ -410,6 +418,8 @@ export const useChatRun = ({
     hint: STATUS_HINTS[statusValue],
   };
   }, [
+    runOutcome,
+    runOutcomeReason,
     guardrailSummary,
     approvalPending,
     retrievalPending,
@@ -795,6 +805,21 @@ export const useChatRun = ({
         setWorkflowRetryInfo(null);
         setWorkflowWaitingInfo(null);
         setApprovalPending(null);
+        if (event.type === "workflow.failed") {
+          setSpanAlerts([]);
+          const reportedReason =
+            typeof event.data?.reason === "string"
+              ? event.data.reason
+              : typeof event.data?.error === "string"
+              ? event.data.error
+              : null;
+          setFinalText((prev) => (prev && prev.length > 0 ? prev : outputRef.current));
+          setRunOutcome("failed");
+          setRunOutcomeReason(reportedReason);
+          setRunComplete(true);
+          setIsStreaming(false);
+          persistActiveRun(null);
+        }
         break;
       }
 
@@ -895,6 +920,7 @@ export const useChatRun = ({
         setIsStreaming(false);
         persistActiveRun(null);
         cleanupSubscription();
+        setSpanAlerts([]);
         break;
       }
 

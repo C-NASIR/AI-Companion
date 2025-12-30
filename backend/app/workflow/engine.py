@@ -340,6 +340,7 @@ class WorkflowEngine:
                     "workflow.failed",
                     {"step": current_step},
                 )
+                await self._emit_run_failure(runtime, reason="missing_activity")
                 self._finish_trace(runtime, "failed")
                 return
             attempt = runtime.workflow_state.record_attempt(current_step)
@@ -570,6 +571,10 @@ class WorkflowEngine:
             "workflow.failed",
             error_payload,
         )
+        await self._emit_run_failure(
+            runtime,
+            reason=self._extract_failure_reason(error_payload),
+        )
         logger.error(
             "workflow step failed run terminated step=%s attempts=%s",
             step,
@@ -610,14 +615,7 @@ class WorkflowEngine:
         runtime.workflow_state.mark_failed(error_payload)
         self.workflow_store.save(runtime.workflow_state)
         await self._emit_workflow_event(state.run_id, "workflow.failed", error_payload)
-        await self.bus.publish(
-            new_event(
-                "run.failed",
-                state.run_id,
-                {"reason": reason, "final_text": state.output_text},
-                identity={"tenant_id": state.tenant_id, "user_id": state.user_id},
-            )
-        )
+        await self._emit_run_failure(runtime, reason=reason)
         self._finish_trace(runtime, "failed")
 
     async def _emit_workflow_event(
@@ -752,6 +750,54 @@ class WorkflowEngine:
             "verify": "verification_failure",
         }
         return mapping.get(step, "network_failure")
+
+    @staticmethod
+    def _extract_failure_reason(error_payload: dict[str, Any] | None) -> str | None:
+        if not error_payload:
+            return None
+        reason = error_payload.get("reason")
+        if isinstance(reason, str) and reason:
+            return reason
+        error_value = error_payload.get("error")
+        if isinstance(error_value, str) and error_value:
+            return error_value
+        return None
+
+    async def _emit_run_failure(
+        self,
+        runtime: WorkflowRuntime,
+        reason: str | None = None,
+    ) -> None:
+        state = runtime.run_state
+        if state.outcome != "failed":
+            state.set_outcome("failed", reason)
+            state.record_decision("outcome", "failed", notes=reason)
+            self.state_store.save(state)
+            if self.activity_context:
+                await self.activity_context.emit_decision(
+                    state,
+                    "outcome",
+                    "failed",
+                    reason or None,
+                )
+        else:
+            self.state_store.save(state)
+        payload: dict[str, Any] = {"final_text": state.output_text}
+        if reason:
+            payload["reason"] = reason
+        identity = self._identity_for_run(state.run_id)
+        await self.bus.publish(
+            new_event("run.failed", state.run_id, payload, identity=identity)
+        )
+        await self.bus.publish(
+            new_event(
+                "status.changed",
+                state.run_id,
+                {"value": "complete"},
+                identity=identity,
+            )
+        )
+
     def _identity_for_run(self, run_id: str) -> dict[str, str] | None:
         runtime = self._runtimes.get(run_id)
         state = runtime.run_state if runtime else self.state_store.load(run_id)
