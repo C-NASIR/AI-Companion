@@ -66,10 +66,7 @@ function buildTimeline(trace: TracePayload | null): TimelineEntry[] {
   if (!trace?.spans?.length) {
     return [];
   }
-  const nodes = new Map<
-    string,
-    { span: SpanRecord; children: SpanRecord[] }
-  >();
+  const nodes = new Map<string, { span: SpanRecord; children: SpanRecord[] }>();
   trace.spans.forEach((span) => {
     nodes.set(span.span_id, { span, children: [] });
   });
@@ -85,14 +82,12 @@ function buildTimeline(trace: TracePayload | null): TimelineEntry[] {
   });
   nodes.forEach((node) => {
     node.children.sort(
-      (a, b) =>
-        Date.parse(a.start_time ?? "") - Date.parse(b.start_time ?? "")
+      (a, b) => Date.parse(a.start_time ?? "") - Date.parse(b.start_time ?? "")
     );
   });
   const roots: SpanRecord[] = [];
   const rootCandidate =
-    (trace.trace.root_span_id &&
-      nodes.get(trace.trace.root_span_id)?.span) ||
+    (trace.trace.root_span_id && nodes.get(trace.trace.root_span_id)?.span) ||
     null;
   if (rootCandidate) {
     roots.push(rootCandidate);
@@ -103,8 +98,7 @@ function buildTimeline(trace: TracePayload | null): TimelineEntry[] {
       }
     });
     roots.sort(
-      (a, b) =>
-        Date.parse(a.start_time ?? "") - Date.parse(b.start_time ?? "")
+      (a, b) => Date.parse(a.start_time ?? "") - Date.parse(b.start_time ?? "")
     );
   }
 
@@ -170,10 +164,7 @@ export default function RunInspectorPage({ params }: InspectorPageProps) {
     loadTrace();
   }, [loadTrace]);
 
-  const timelineEntries = useMemo(
-    () => buildTimeline(traceData),
-    [traceData]
-  );
+  const timelineEntries = useMemo(() => buildTimeline(traceData), [traceData]);
   const selectedSpan = useMemo(
     () =>
       timelineEntries.find((entry) => entry.span.span_id === selectedSpanId)
@@ -288,7 +279,7 @@ export default function RunInspectorPage({ params }: InspectorPageProps) {
           )}
         </div>
 
-        <div className="space-y-4">
+        <div className="space-y-4 max-w-4xl">
           <div className="rounded-2xl border border-slate-800/70 bg-slate-900/60 p-4">
             <h2 className="text-lg font-semibold text-white">Span details</h2>
             {selectedSpan ? (
@@ -303,9 +294,7 @@ export default function RunInspectorPage({ params }: InspectorPageProps) {
                 </p>
                 <p>
                   <span className="text-slate-400">Status:</span>{" "}
-                  <span className="font-semibold">
-                    {selectedSpan.status}
-                  </span>
+                  <span className="font-semibold">{selectedSpan.status}</span>
                 </p>
                 <p>
                   <span className="text-slate-400">Duration:</span>{" "}
@@ -324,7 +313,7 @@ export default function RunInspectorPage({ params }: InspectorPageProps) {
                 {selectedSpan.error ? (
                   <>
                     <p className="text-slate-400">Error:</p>
-                    <pre className="rounded-lg border border-rose-900/40 bg-rose-950/30 p-2 text-xs text-rose-100">
+                    <pre className="rounded-lg border border-rose-900/40 bg-rose-950/30 p-2 text-xs text-rose-100 overflow-scroll">
                       {safeJson(selectedSpan.error)}
                     </pre>
                   </>
@@ -370,8 +359,8 @@ export default function RunInspectorPage({ params }: InspectorPageProps) {
           </span>
         </p>
         <p>
-          Started at {formatTimestamp(traceData?.trace.start_time)} — Finished at{" "}
-          {formatTimestamp(traceData?.trace.end_time)}
+          Started at {formatTimestamp(traceData?.trace.start_time)} — Finished
+          at {formatTimestamp(traceData?.trace.end_time)}
         </p>
       </section>
     </main>
