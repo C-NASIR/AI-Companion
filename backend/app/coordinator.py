@@ -91,15 +91,6 @@ class RunCoordinator:
                 identity={"tenant_id": state.tenant_id, "user_id": state.user_id},
             )
         )
-        try:
-            if self.start_workflow_on_run_start:
-                await self.workflow_engine.start_run(state)
-        except Exception:
-            if self.rate_limiter:
-                self.rate_limiter.release(run_id)
-            if self.budget_manager:
-                self.budget_manager.reset(run_id)
-            raise
         logger.info("workflow queued", extra=state.log_extra())
 
     async def shutdown(self) -> None:
