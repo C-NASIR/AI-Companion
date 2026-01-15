@@ -1,3 +1,5 @@
+<img width="1728" height="1117" alt="Screenshot 2025-12-30 at 8 05 45 PM" src="https://github.com/user-attachments/assets/63efaac9-3b5e-49cc-8346-154fbb4435d7" />
+
 # AI Companion
 
 An event-driven “AI agent in a box” you can run locally: chat UI + FastAPI backend with retrieval, a durable workflow engine, Model Context Protocol (MCP) tool execution, guardrails, tracing, and a deterministic evaluation harness.
@@ -172,6 +174,8 @@ Operational notes and validation steps live in:
 ---
 
 ## Observability (Events + Traces)
+<img width="1728" height="1117" alt="Screenshot 2025-12-30 at 8 05 57 PM" src="https://github.com/user-attachments/assets/d2ede0f9-fc4e-47d6-a6ea-0cb2fd91a612" />
+<img width="1728" height="1083" alt="Screenshot 2025-12-30 at 8 06 19 PM" src="https://github.com/user-attachments/assets/f0708b05-108e-4025-94bf-e5eb7d1c6fe1" />
 
 ### Events (SSE)
 
